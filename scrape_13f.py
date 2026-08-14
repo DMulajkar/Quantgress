@@ -51,10 +51,18 @@ import requests
 
 from schema import DB_PATH
 
-INDEX_URL = "https://www.sec.gov/data-research/sec-markets-data/form-13f-structured-data-sets"
+INDEX_URL = "https://www.sec.gov/data-research/sec-markets-data/form-13f-data-sets"
 # Path prefix isn't stable across quarters (same discovery live taught Phase
 # 9) -- read the real href off the index page instead of guessing the URL.
-ZIP_RE = re.compile(r'href="(/files/[^"]+/(\d{4})q([1-4])_form13f\.zip)"')
+# ponytail: SEC also renamed the *files* partway through, not just the path --
+# quarters through 2023q4 are "2026q1_form13f.zip", 2024q1-onward are
+# "01mar2026-31may2026_form13f.zip" (window starting the quarter-end month,
+# named that way because the 45-day filing deadline runs past quarter-end).
+# Both patterns map onto the same YYYYqN key so --quarter 2026q1 keeps working.
+ZIP_RE = re.compile(
+    r'href="(/files/[^"]+/(?:(\d{4})q([1-4])|01(mar|jun|sep|dec)(\d{4})-\d{2}\w{3}\d{4})_form13f\.zip)"'
+)
+_MONTH_Q = {"mar": "1", "jun": "2", "sep": "3", "dec": "4"}
 
 TABLE = "f13_holdings"
 COLUMNS = ["accession_number", "infotable_sk", "period_of_report", "filed_date",
@@ -224,7 +232,11 @@ def list_periods(s):
     r = _get(s, INDEX_URL)
     if r is None:
         return {}
-    return {f"{y}q{q}": "https://www.sec.gov" + path for path, y, q in ZIP_RE.findall(r.text)}
+    out = {}
+    for path, y, q, mon, y2 in ZIP_RE.findall(r.text):
+        key = f"{y}q{q}" if y else f"{y2}q{_MONTH_Q[mon]}"
+        out[key] = "https://www.sec.gov" + path
+    return out
 
 
 # --------------------------------------------------------------- networking
