@@ -26,6 +26,7 @@ import sys
 import entities
 import scrape_house
 import scrape_senate
+import scrape_short_volume
 
 
 def house_years(today=None):
@@ -45,6 +46,15 @@ def main():
 
     print("\n--- Resolve entities ---")
     entities.main()
+
+    # Phase 11: the first dataset in this file that's genuinely daily -- one
+    # new file per trade date, posted by 6pm ET, no year-window bookkeeping
+    # needed like Senate/House above (scrape_short_volume's own done-set skip
+    # handles resumption). Its own default trailing window (DAYS_DEFAULT) is
+    # plenty for a once-a-day cron.
+    today = datetime.date.today()
+    print("\n--- Off-exchange short volume ---")
+    scrape_short_volume.main(today - datetime.timedelta(days=scrape_short_volume.DAYS_DEFAULT), today)
 
 
 def selftest():

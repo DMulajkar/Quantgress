@@ -19,7 +19,7 @@ Congress trades first, then the rest of the [[Quiver Quant API - Dataset Catalog
 - Phase 8 — entity resolution refactor. ✅ DONE
 - Phase 9 — insider trades (Form 4). ✅ DONE
 - Phase 10 — 13F holdings, changes, top shareholders. ✅ DONE
-- Phase 11 — off-exchange short volume. *pending*
+- Phase 11 — off-exchange short volume. ✅ DONE
 - Phase 12 — patents. *pending*
 - Phase 13 — corporate donors. *pending*
 - Phase 14 — Wikipedia pageviews. ✅ DONE (built out of order, before 8–13)
@@ -194,9 +194,39 @@ Re-running skips `(accession_number, infotable_sk)` already stored.
 - `f13_changes` cannot flag a fully **exited** position: 13F never reports a zero-share row, a dropped holding just stops appearing in the next filing. Spotting that needs anti-joining every manager's full history each quarter — left as a known gap, documented rather than silently missing (same posture as Phase 2's OCR path).
 - An amendment (`13F-HR/A`) gets its own `accession_number` and is kept as its own row in `f13_holdings` — same "as filed" posture as every other phase's raw table. The views collapse this: `f13_positions` (the shared base of both) picks the most-recently-filed accession per manager/cusip/quarter, so an amendment supersedes the original it corrects in `f13_changes`/`f13_top_holders` without deleting the original row.
 
-## Phase 11 — off-exchange short volume — *pending*
+## Phase 11 — off-exchange short volume — ✅ DONE
 
-FINRA daily files, fixed-layout, posted by 6pm ET on the trade date. Genuinely daily — the first dataset here that rewards the cron (unlike Phase 10).
+**Module:** `scrape_short_volume.py`
+
+FINRA's daily Reg SHO short sale volume files, posted by 6pm ET on the trade
+date. One pipe-delimited file per day (`CNMSshvol{YYYYMMDD}.txt`) — the
+consolidated figure across every off-exchange venue (ADF + the Nasdaq/NYSE
+TRFs) for each NMS-listed symbol. "Off-exchange" is the point: these are
+trades that never printed to a listing exchange's own tape.
+
+```
+py scrape_short_volume.py --selftest              # offline checks, no network
+py scrape_short_volume.py --days 30                # last 30 trade dates
+py scrape_short_volume.py --start 2026-01-01 --end 2026-01-31 --limit 500
+py scrape_short_volume.py                          # last 5 days, unbounded
+```
+
+Re-running skips `(trade_date, symbol, market)` rows already stored, so an
+interrupted run resumes.
+
+Genuinely daily — the first dataset here that rewards the cron (unlike
+Phase 10) — so it's the first non-congress source added to `daily.py`.
+
+**No `entities.py` resolution needed:** `Symbol` is already a real exchange
+ticker straight from FINRA, not a free-text name to match — same shortcut
+Phase 9 found for CIK-adjacent tickers.
+
+**Gotchas:**
+- Weekends never hit the network (markets closed, no file exists); a weekday
+  404 (holiday, or today's file not posted by 6pm ET yet) is a legitimate
+  response, same as `scrape_pageviews.py`'s article lookups — not retried.
+- "Fixed-layout" in FINRA's own docs means a fixed *file naming/column*
+  layout, not fixed-width text — the body is pipe-delimited.
 
 ## Phase 12 — patents — *pending*
 
