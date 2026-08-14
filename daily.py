@@ -23,7 +23,7 @@ script with three print-heavy steps already.
 import datetime
 import sys
 
-import resolve_tickers
+import entities
 import scrape_house
 import scrape_senate
 
@@ -43,8 +43,8 @@ def main():
     print(f"\n--- House {years} ---")
     scrape_house.main(years)
 
-    print("\n--- Resolve tickers ---")
-    resolve_tickers.main()
+    print("\n--- Resolve entities ---")
+    entities.main()
 
 
 def selftest():

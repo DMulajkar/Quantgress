@@ -10,7 +10,7 @@ DB_PATH = "congress_trades.duckdb"
 
 # Both chambers land in the same shape so the view is one SELECT body twice.
 # House has no ticker column on the form (the symbol is inside asset_name), so
-# `ticker` is always NULL there and resolve_tickers.py fills `ticker_guess`.
+# `ticker` is always NULL there and entities.py fills `ticker_guess`.
 COLUMNS = """first_name VARCHAR, last_name VARCHAR, office VARCHAR,
     filed VARCHAR, link VARCHAR, tx_date VARCHAR, owner VARCHAR,
     ticker VARCHAR, asset_name VARCHAR, asset_type VARCHAR,
