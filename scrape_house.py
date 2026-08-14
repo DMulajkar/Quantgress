@@ -52,16 +52,26 @@ ROW = re.compile(
     r"(?P<tx_date>\d{1,2}/\d{1,2}/\d{4})\s+\d{1,2}/\d{1,2}/\d{4}\s+"
     r"(?P<amt>\$[\d,]+(?:\s*-\s*(?:\$[\d,]+)?|\s*\+)?)\s*\S*$"
 )
-# What ends an asset name. Current filings render section labels in small caps,
-# which pdfplumber emits as a letter followed by NULs ("D\x00\x00...: RSU
-# distribution" = Description) -- parse_text treats any NUL as a stop. Pre-2018
-# filings have no NULs, so labels are caught by shape instead: up to three words
-# then a colon ("FIlINg STATuS:", "SuBHOlDINg OF:"). Kept narrow deliberately --
-# an asset name can wrap onto a line ending in a colon ("... NYSEARCA:"), and
-# that is five words, so it stays part of the name.
-STOP = re.compile(r"^(ID Owner Asset|Type Date|\$200\?|\*|Filing ID|"
-                  r"Clerk of the House|Transactions|Filer Information|"
-                  r"Asset Class Details|Initial Public Offering|Certification|"
+# Page furniture: never part of an asset name, but it does NOT end one either.
+# A long filing repeats the column header on every page, and an asset name can
+# wrap across that break -- "Global Payments Inc. Common Stock" ends page 5 and
+# "(GPN) [ST]" begins page 6. Treating the header as a terminator silently drops
+# the ticker off every name unlucky enough to straddle a page.
+# "gfedc"/"nmlkj" are the form's checkbox glyphs, which pdfplumber renders as
+# those literal letters -- they land on their own line after a page break.
+SKIP = re.compile(r"^(ID Owner Asset|Type Date|\$200\?|\*|Filing ID|"
+                  r"Clerk of the House|Name:|Status:|State/District:|"
+                  r"(?:gfedc|nmlkj)\w*\s*$)", re.I)
+
+# What genuinely ends an asset name. Current filings render section labels in
+# small caps, which pdfplumber emits as a letter followed by NULs ("D\x00\x00...
+# : RSU distribution" = Description) -- parse_text treats any NUL as a stop.
+# Pre-2018 filings have no NULs, so labels are caught by shape instead: up to
+# three words then a colon ("FIlINg STATuS:", "SuBHOlDINg OF:"). Kept narrow
+# deliberately -- an asset name can wrap onto a line ending in a colon
+# ("... NYSEARCA:"), and that is five words, so it stays part of the name.
+STOP = re.compile(r"^(Transactions|Filer Information|Asset Class Details|"
+                  r"Initial Public Offering|Certification|"
                   r"(?:[A-Za-z]+ ){0,2}[A-Za-z]+:)", re.I)
 OWNERS = {"SP": "Spouse", "JT": "Joint", "DC": "Dependent Child"}
 # "... (INTU) [ST]". Pre-2018 small caps make this lowercase ("[gS]"), so match
@@ -152,8 +162,8 @@ def parse_text(text):
     open_row = False  # is the last row still allowed to absorb wrapped lines?
     for raw in text.splitlines():
         line = raw.replace("\x00", "").strip()
-        if not line:
-            continue
+        if not line or SKIP.match(line):
+            continue  # page furniture -- leaves an open asset name open
         m = ROW.match(line)
         if m:
             g = m.groupdict()
@@ -296,11 +306,22 @@ def selftest():
         "D\x00\x00\x00\x00: RSU distribution\n"
         "Listen Ventures IV, LP [HN] P 05/13/2026 05/13/2026 $250,001 -\n"
         "$500,000\n"
+        # an asset name straddling a page break: the repeated column header
+        # sits between the transaction line and the rest of its name
+        "Global Payments Inc. Common Stock S 05/15/2026 06/05/2026 $1,001 - $15,000\n"
+        "ID Owner Asset Transaction Date Notification Amount Cap.\n"
+        "Type Date Gains >\n"
+        "$200?\n"
+        "gfedc\n"
+        "(GPN) [ST]\n"
+        "F\x00\x00\x00\x00\x00 S\x00\x00\x00\x00\x00: New\n"
     )
     rows = parse_text(text)
-    assert len(rows) == 3, rows
+    assert len(rows) == 4, rows
 
-    a, b, c = rows
+    a, b, c, page_split = rows
+    assert page_split["asset_name"] == "Global Payments Inc. Common Stock (GPN)", page_split["asset_name"]
+    assert page_split["asset_type"] == "Stocks (including ADRs)"
     assert a["owner"] == "Spouse" and a["tx_type"] == "Sale (Full)"
     assert a["asset_name"] == "Intuit Inc. - Common Stock (INTU)", a["asset_name"]
     assert a["asset_type"] == "Stocks (including ADRs)"

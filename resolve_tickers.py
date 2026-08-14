@@ -20,6 +20,7 @@ is never overwritten. Query `coalesce(ticker, ticker_guess)` to use both.
 
 import re
 import sys
+from collections import Counter
 
 import duckdb
 
@@ -77,38 +78,48 @@ def extract(asset_name):
 
 
 def resolve(con, table, dry):
-    todo = [r[0] for r in con.execute(
-        f"""SELECT DISTINCT asset_name FROM {table}
-            WHERE ticker IS NULL AND ticker_guess IS NULL AND {TICKERED}"""
-    ).fetchall()]
+    todo = con.execute(
+        f"""SELECT asset_name, count(*) AS n FROM {table}
+            WHERE ticker IS NULL AND ticker_guess IS NULL AND {TICKERED}
+            GROUP BY 1 ORDER BY n DESC, 1"""
+    ).fetchall()
+    print(f"\n=== {table} " + "=" * (46 - len(table)))
     if not todo:
-        print(f"\n{table}: nothing left to resolve")
+        print("  nothing left to resolve")
         return
 
-    hits = [(n, *e) for n in todo if (e := extract(n))]
-    misses = [n for n in todo if not extract(n)]
+    hits = [(n, rows, *e) for n, rows in todo if (e := extract(n))]
+    misses = [(n, rows) for n, rows in todo if not extract(n)]
+    by_how = Counter(how for *_, how in hits)
 
-    print(f"\n{table}:")
-    for name, tk, how in hits[:15]:
-        print(f"  {tk:6} {how:9} <- {name[:65]}")
-    print(f"  extracted {len(hits)} of {len(todo)} names")
+    print(f"  {len(todo)} unresolved names / {sum(r for _, r in todo)} rows\n")
+    print(f"  RESOLVED   {len(hits)} names / {sum(h[1] for h in hits)} rows"
+          + f"   ({', '.join(f'{k} {v}' for k, v in by_how.most_common())})")
+    for name, rows, tk, how in hits[:12]:
+        print(f"    {tk:<7} {how:<10} x{rows:<4} {name[:58]}")
+    if len(hits) > 12:
+        print(f"    ... and {len(hits) - 12} more")
+
     if misses:
-        print(f"  {len(misses)} with no ticker in the name (left NULL, inspect by hand):")
-        for n in misses[:25]:
-            print(f"    - {n[:75]}")
+        print(f"\n  NO TICKER IN THE NAME   {len(misses)} names /"
+              f" {sum(r for _, r in misses)} rows, left NULL")
+        for name, rows in misses[:20]:
+            print(f"    {'':<7} {'':<10} x{rows:<4} {name[:58]}")
+        if len(misses) > 20:
+            print(f"    ... and {len(misses) - 20} more")
 
     if dry or not hits:
         return
     con.executemany(
         f"""UPDATE {table} SET ticker_guess = ?, ticker_guess_how = ?
             WHERE asset_name = ? AND ticker IS NULL""",
-        [(tk, how, n) for n, tk, how in hits],
+        [(tk, how, n) for n, _, tk, how in hits],
     )
     rows, names = con.execute(
         f"""SELECT count(*), count(DISTINCT asset_name) FROM {table}
             WHERE ticker_guess IS NOT NULL"""
     ).fetchone()
-    print(f"  {rows} rows ({names} names) now carry a ticker_guess")
+    print(f"\n  WROTE      {table} now has {rows} rows ({names} names) with a ticker_guess")
 
 
 def main(dry=False):
