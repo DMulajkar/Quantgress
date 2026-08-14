@@ -91,11 +91,27 @@ def parse_application(item):
     }
 
 
+def _load_dotenv():
+    # ponytail: stdlib KEY=value parser, not python-dotenv -- one key in one
+    # file doesn't earn a new dependency. Doesn't override a real env var.
+    path = os.path.join(os.path.dirname(__file__), ".env")
+    if not os.path.exists(path):
+        return
+    for line in open(path):
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        os.environ.setdefault(k.strip(), v.strip())
+
+
 def _session():
+    _load_dotenv()
     key = os.environ.get("USPTO_API_KEY")
     if not key:
         sys.exit("USPTO_API_KEY not set -- sign up for a free MyUSPTO account "
-                  "(requires ID.me verification) and export the key before running.")
+                  "(requires ID.me verification), put it in .env as "
+                  "USPTO_API_KEY=<key>, or export it before running.")
     s = requests.Session()
     s.headers["X-API-Key"] = key
     s.headers["User-Agent"] = "quantgress/0.1 (personal research)"
@@ -104,7 +120,14 @@ def _session():
 
 def _get(s, params, tries=4):
     """GET with retry -- mirrors scrape_contracts._post: retries both a bad
-    status code and a connection-level failure."""
+    status code and a connection-level failure.
+
+    # ponytail: found live, not from docs -- a zero-result query 404s here
+    # ({"code":"404",...,"detailedMessage":"No matching records found..."}),
+    # not an empty 200 like the docstring below originally assumed. Same
+    # "404 is a legitimate answer, not a failure" shape as
+    # scrape_pageviews._get -- returns None immediately, no retry burned.
+    """
     for attempt in range(tries):
         try:
             r = s.get(API, params=params, timeout=30)
@@ -115,6 +138,8 @@ def _get(s, params, tries=4):
             continue
         if r.status_code == 200:
             return r
+        if r.status_code == 404:
+            return None
         if attempt == tries - 1:
             r.raise_for_status()
         time.sleep(5 * (attempt + 1))
@@ -123,13 +148,17 @@ def _get(s, params, tries=4):
 def list_applications(s, day):
     """Yield one application result dict at a time for patents granted on
     `day` (a date object). Most days are empty -- patents are only granted on
-    Tuesdays -- an empty first page is normal, not an error."""
+    Tuesdays -- a 404 ("no matching records") is normal on those, not an
+    error."""
     offset = 0
     while True:
         time.sleep(RATE_LIMIT_SECS)
         params = {"q": f"applicationMetaData.grantDate:{day.isoformat()}",
                   "offset": offset, "limit": PAGE_SIZE}
-        data = _get(s, params).json()
+        r = _get(s, params)
+        if r is None:
+            return
+        data = r.json()
         results = data.get("patentFileWrapperDataBag", [])
         yield from results
         offset += len(results)
@@ -246,6 +275,19 @@ def selftest():
     finally:
         time.sleep = real_sleep
     assert len(results) == 3 and _TwoPages.calls == 2
+
+    # a 404 ("no matching records") is a legitimate answer, not a failure --
+    # _get returns None immediately (no retry burned), list_applications
+    # yields nothing and doesn't crash
+    class _NoResults:
+        calls = 0
+
+        def get(self, *a, **k):
+            _NoResults.calls += 1
+            return type("R", (), {"status_code": 404})()
+
+    results = list(list_applications(_NoResults(), datetime.date(2026, 1, 1)))
+    assert results == [] and _NoResults.calls == 1
 
     print("selftest ok")
 
