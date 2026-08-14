@@ -18,7 +18,7 @@ Congress trades first, then the rest of the [[Quiver Quant API - Dataset Catalog
 - Phase 7 — government contracts. ✅ DONE
 - Phase 8 — entity resolution refactor. ✅ DONE
 - Phase 9 — insider trades (Form 4). ✅ DONE
-- Phase 10 — 13F holdings, changes, top shareholders. *pending*
+- Phase 10 — 13F holdings, changes, top shareholders. ✅ DONE
 - Phase 11 — off-exchange short volume. *pending*
 - Phase 12 — patents. *pending*
 - Phase 13 — corporate donors. *pending*
@@ -166,11 +166,33 @@ Sequenced ahead of the name-matched datasets because CIK → ticker is a lookup 
 
 **Scope cut in v1:** only Table I (non-derivative) transactions — the actual reported buy/sell of the underlying stock. Table II (derivatives: options, RSUs, swaps) and the two holdings-only tables are a different, more complex signal and are left out.
 
-## Phase 10 — 13F holdings, changes, top shareholders — *pending*
+## Phase 10 — 13F holdings, changes, top shareholders — ✅ DONE
 
-One SEC pipeline, three Quiver datasets: raw holdings, the quarter-over-quarter diff, and the same data pivoted by issuer. Best datasets-per-unit-effort in the whole catalog.
+**Module:** `scrape_13f.py`
 
-**Gotchas:** quarterly refresh — does **not** belong on the Phase 4 daily cron.
+One SEC pipeline, three Quiver datasets: raw holdings, the quarter-over-quarter diff, and the same data pivoted by issuer (top shareholders). Best datasets-per-unit-effort in the whole catalog — built as **one scraped table plus two SQL views**, not three scraped tables: `f13_holdings` is the only thing pulled over the network; `f13_changes` and `f13_top_holders` are `CREATE OR REPLACE VIEW`s computed over it, same "the view is what you query" posture `schema.py`'s `trades` view established in Phase 1.
+
+Same bulk-quarterly-zip shape as Phase 9 — SEC's Form 13F structured data sets, one zip of tab-delimited tables (`SUBMISSION`, `COVERPAGE`, `INFOTABLE`) per quarter, joined on `ACCESSION_NUMBER`.
+
+```
+py scrape_13f.py --selftest              # offline checks, no network
+py scrape_13f.py --quarter 2026q1 --limit 50   # bounded backfill
+py scrape_13f.py --quarter 2026q1        # one quarter, full
+py scrape_13f.py                         # latest posted quarter
+```
+
+Re-running skips `(accession_number, infotable_sk)` already stored.
+
+**Scope cut in v1:** bulk-only, no "live" EDGAR-daily mode like Phase 9's. 13F is inherently quarterly (45-day deadline after quarter-end) and — per the gotcha below — deliberately doesn't belong on the Phase 4 daily cron, so there's no "gap since the last bulk zip" to fill on a tight cadence the way Phase 9's Form 4 stream needs.
+
+**Ticker resolution:** unlike Phase 9 (where the ticker sits right next to the CIK), 13F's `INFOTABLE` has no ticker/symbol field at all — only free-text `issuer_name` and a CUSIP. Registered as a new `entities.py` `sec_name` adapter, same strategy as Phase 6/7's `client_name`/`recipient_name`; no new resolution logic needed.
+
+**Gotchas:**
+- Quarterly refresh — does **not** belong on the Phase 4 daily cron.
+- SEC's bulk `VALUE` column is reported in **thousands of dollars**. Stored here already scaled to `value_usd` so nothing downstream has to remember it.
+- `13F-NT` (notice-only — the manager reports no holdings itself, another manager files on its behalf) submissions are dropped; only `SUBMISSIONTYPE` starting `13F-HR` (original or `/A` amendment) ever has real `INFOTABLE` rows.
+- `f13_changes` cannot flag a fully **exited** position: 13F never reports a zero-share row, a dropped holding just stops appearing in the next filing. Spotting that needs anti-joining every manager's full history each quarter — left as a known gap, documented rather than silently missing (same posture as Phase 2's OCR path).
+- An amendment (`13F-HR/A`) gets its own `accession_number` and is kept as its own row in `f13_holdings` — same "as filed" posture as every other phase's raw table. The views collapse this: `f13_positions` (the shared base of both) picks the most-recently-filed accession per manager/cusip/quarter, so an amendment supersedes the original it corrects in `f13_changes`/`f13_top_holders` without deleting the original row.
 
 ## Phase 11 — off-exchange short volume — *pending*
 

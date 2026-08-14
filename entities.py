@@ -128,6 +128,11 @@ SOURCES = [
     dict(table="gov_contracts", name_col="recipient_name", real_col=None,
          guess_col="recipient_ticker_guess", how_col="recipient_ticker_guess_how",
          extra_where=None, kind="sec_name"),
+    # Phase 10 (13F): INFOTABLE has no ticker/symbol field at all, only free-text
+    # issuer_name -- same shape as lobbying/contracts, not Phase 9's free lookup.
+    dict(table="f13_holdings", name_col="issuer_name", real_col=None,
+         guess_col="issuer_ticker_guess", how_col="issuer_ticker_guess_how",
+         extra_where=None, kind="sec_name"),
 ]
 
 
