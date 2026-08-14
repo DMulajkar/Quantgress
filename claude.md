@@ -21,7 +21,7 @@ Congress trades first, then the rest of the [[Quiver Quant API - Dataset Catalog
 - Phase 10 — 13F holdings, changes, top shareholders. *pending*
 - Phase 11 — off-exchange short volume. ✅ DONE
 - Phase 12 — patents. ✅ DONE (built, not yet exercised against the live API -- see below)
-- Phase 13 — corporate donors. *pending*
+- Phase 13 — corporate donors. ✅ DONE (built, not yet exercised against the live API -- see below)
 - Phase 14 — Wikipedia pageviews. ✅ DONE (built out of order, before 8–13)
 
 Ordering note: phases are ordered cheapest-first, with **one exception — Phase 8 is a refactor that blocks everything after it, so it is not skippable for convenience.** Phase 14 breaks the order deliberately (see below).
@@ -251,9 +251,45 @@ correction.
 - `PAGE_SIZE = 100` is an unconfirmed guess -- ODP's own documented default
   page size is 25 when no `limit` is given; a live run may need a lower cap.
 
-## Phase 13 — corporate donors — *pending*
+## Phase 13 — corporate donors — ✅ DONE (built, not yet exercised live -- see below)
 
-OpenFEC. Committee/donor name matching, same difficulty class as Phase 12, and it closes the political-money loop opened in Phase 6 — donations in, lobbying out, trades alongside.
+**Module:** `scrape_donors.py`
+
+OpenFEC `/schedules/schedule_a/`, filtered to `is_individual=false` -- Schedule
+A itemized receipts where the contributor is a committee/PAC/organization,
+not a person. That's the "corporate donor" slice, closing the political-money
+loop opened in Phase 6: donations in, lobbying out, congress trades alongside.
+`contributor_name` is committee/donor free text with no ticker field, same
+difficulty class as Phase 12 -- another `entities.py` sec_name adapter.
+
+```
+py scrape_donors.py --selftest              # offline checks, no network
+py scrape_donors.py --limit 20                # bounded run, current cycle
+py scrape_donors.py --cycle 2024               # one two-year FEC cycle
+py scrape_donors.py --cycle 2024 --limit 500
+py scrape_donors.py                            # current cycle, unbounded
+```
+
+Re-running skips `sub_id`s already stored. Scoped by FEC's own two-year cycle
+(labeled by its ending even year) rather than a date window, the same way
+Phase 6 scopes lobbying by calendar year -- one cycle is already the natural
+unit FEC data is filed and reported in.
+
+**Correction (2026-08-14, before a live run):** built with `api.open.fec.gov`
+unreachable from the dev environment (same block hit on finra.org and
+api.uspto.gov), so the request shape -- endpoint, filter params, and the
+seek-based `last_index`/`last_contribution_receipt_date` pagination cursor
+-- comes from the public `fecgov/openFEC` source on GitHub, not a live call.
+Flagging this the same way as Phase 12, not pretending it's confirmed.
+
+**Gotchas:**
+- Needs an OpenFEC API key (`FEC_API_KEY`), but unlike Phase 12's USPTO gate
+  this is a free, instant `api.data.gov` signup with no ID.me step.
+- Expect a lower `entities.py` hit rate than Phase 6/7/12: `contributor_name`
+  arrives as a PAC name (`"ACME WIDGET CORP PAC"`), and `normalize_name`'s
+  legal-suffix stripping doesn't yet know "PAC" / "POLITICAL ACTION
+  COMMITTEE" the way it knows "INC" / "CORP" — most rows will likely go
+  unmatched (dropped, not guessed at) until that's extended.
 
 ## Phase 14 — Wikipedia pageviews — ✅ DONE (built out of order)
 
