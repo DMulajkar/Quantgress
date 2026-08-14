@@ -22,7 +22,8 @@ DB_PATH = "congress_trades.duckdb"
 
 SUMMARY = """
 SELECT last_name, count(*) AS txns, count(DISTINCT tkr) AS tickers,
-       min(txn_date) AS earliest, max(txn_date) AS latest
+       min(txn_date) AS first_trade, max(txn_date) AS last_trade,
+       min(filed_date) AS first_filing, max(filed_date) AS last_filing
 FROM trades GROUP BY last_name ORDER BY txns DESC
 """
 
@@ -35,7 +36,8 @@ FROM trades GROUP BY asset_type ORDER BY txns DESC
 """
 
 BY_TYPE = """
-SELECT txn_date, last_name, tkr, asset_name, tx_type, amount_low, amount_high
+SELECT last_name, tkr, asset_name, tx_type, amount_low, amount_high,
+       txn_date, filed_date, lag_days
 FROM trades WHERE asset_type = ? ORDER BY txn_date DESC LIMIT {limit}
 """
 

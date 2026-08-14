@@ -135,15 +135,24 @@ def ensure_view(con):
     ORDER BY sorts chronologically instead of lexically.
     """
     con.execute(
-        """CREATE OR REPLACE VIEW trades AS SELECT
-            last_name, first_name, office,
-            asset_type, tx_type,
-            coalesce(ticker, ticker_guess) AS tkr,
-            ticker IS NULL AND ticker_guess IS NOT NULL AS tkr_recovered,
-            asset_name, amount_low, amount_high,
+        r"""CREATE OR REPLACE VIEW trades AS SELECT
+            last_name,
+            -- Exchange rows pack both legs into one cell ("--  AMCR" = gave up
+            -- an untickered holding, received AMCR). Take the trailing symbol,
+            -- i.e. what they hold afterwards. Plain tickers pass through.
+            coalesce(
+                nullif(nullif(regexp_extract(trim(ticker), '([A-Z.\-]+)$', 1),
+                              '--'), ''),
+                ticker_guess) AS tkr,
+            asset_name, tx_type, amount_low, amount_high,
             try_strptime(tx_date, '%m/%d/%Y')::DATE AS txn_date,
             try_strptime(filed, '%m/%d/%Y')::DATE AS filed_date,
-            link
+            date_diff('day', try_strptime(tx_date, '%m/%d/%Y')::DATE,
+                             try_strptime(filed, '%m/%d/%Y')::DATE) AS lag_days,
+            -- secondary columns: filtering, auditing, provenance
+            asset_type, owner,
+            ticker IS NULL AND ticker_guess IS NOT NULL AS tkr_recovered,
+            first_name, office, link
         FROM senate_trades"""
     )
 
