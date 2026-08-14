@@ -133,6 +133,11 @@ SOURCES = [
     dict(table="f13_holdings", name_col="issuer_name", real_col=None,
          guess_col="issuer_ticker_guess", how_col="issuer_ticker_guess_how",
          extra_where=None, kind="sec_name"),
+    # Phase 12: assignee_name is a raw company name off the grant record,
+    # same shape as lobbying/contracts -- no ticker field to begin with.
+    dict(table="patents", name_col="assignee_name", real_col=None,
+         guess_col="assignee_ticker_guess", how_col="assignee_ticker_guess_how",
+         extra_where=None, kind="sec_name"),
 ]
 
 

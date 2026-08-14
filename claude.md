@@ -20,7 +20,7 @@ Congress trades first, then the rest of the [[Quiver Quant API - Dataset Catalog
 - Phase 9 — insider trades (Form 4). ✅ DONE
 - Phase 10 — 13F holdings, changes, top shareholders. ✅ DONE
 - Phase 11 — off-exchange short volume. ✅ DONE
-- Phase 12 — patents. *pending*
+- Phase 12 — patents. ✅ DONE (built, not yet exercised against the live API -- see below)
 - Phase 13 — corporate donors. *pending*
 - Phase 14 — Wikipedia pageviews. ✅ DONE (built out of order, before 8–13)
 
@@ -228,9 +228,50 @@ Phase 9 found for CIK-adjacent tickers.
 - "Fixed-layout" in FINRA's own docs means a fixed *file naming/column*
   layout, not fixed-width text — the body is pipe-delimited.
 
-## Phase 12 — patents — *pending*
+## Phase 12 — patents — ✅ DONE (built, not yet exercised live -- see below)
 
-USPTO Open Data Portal. First dataset with no clean key at all: assignee name → ticker. The real test of Phase 8.
+**Module:** `scrape_patents.py`
+
+USPTO Open Data Portal (ODP), `patent/applications/search`, queried one
+grant-date at a time. First dataset with no clean key at all: `assignee_name`
+→ ticker, free text off the grant record, same shape as lobbying/contracts --
+the real test of Phase 8's `sec_name` adapter, now registered for it in
+`entities.py`.
+
+```
+py scrape_patents.py --selftest                  # offline checks, no network
+py scrape_patents.py --days 30                    # last 30 calendar days
+py scrape_patents.py --start 2026-01-01 --end 2026-01-31 --limit 500
+py scrape_patents.py                              # last 10 days, unbounded
+```
+
+Re-running skips `application_number`s already stored.
+
+**Assignee, not applicant:** a patent's first applicant is often just the
+inventor, not the entity that owns it. `pick_assignee()` prefers a recorded
+assignment's `assigneeNameText` and only falls back to `firstApplicantName`
+when no assignment is on file yet -- same trust ordering Phase 8 already
+uses (a direct signal beats an inferred one).
+
+**Correction (2026-08-14, before a live run):** this module was built with
+`api.uspto.gov` unreachable from the dev environment (same network-egress
+block hit on finra.org, data.uspto.gov, etc.), so unlike every other phase
+here it has **not** been confirmed against a live response. The request
+shape (`GET .../search?q=applicationMetaData.grantDate:{date}&offset=&limit=`)
+is built from the published OpenAPI spec and third-party client docs, not a
+live call -- treat the query syntax as the most likely thing to need a
+follow-up fix once it actually runs, same spirit as Phase 6's post-build
+correction.
+
+**Gotchas:**
+- Needs a real API key, not just a User-Agent string like the other
+  data.gov-adjacent sources: free MyUSPTO account + ID.me verification, then
+  `USPTO_API_KEY` in the environment as the `X-API-Key` header.
+- Patents are only granted on Tuesdays, so most days in a range come back
+  empty -- that's expected, not a bug. Default window is 10 days (not
+  Phase 7's 7) to always cover at least one grant day with slack.
+- `PAGE_SIZE = 100` is an unconfirmed guess -- ODP's own documented default
+  page size is 25 when no `limit` is given; a live run may need a lower cap.
 
 ## Phase 13 — corporate donors — *pending*
 
