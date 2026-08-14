@@ -127,6 +127,27 @@ def parse_ptr(html):
     return out.to_dict("records")
 
 
+def ensure_view(con):
+    """The `trades` view: what you actually want to query.
+
+    Bakes in the two things every query otherwise repeats -- coalescing the
+    recovered ticker, and parsing MM/DD/YYYY strings into real DATEs so
+    ORDER BY sorts chronologically instead of lexically.
+    """
+    con.execute(
+        """CREATE OR REPLACE VIEW trades AS SELECT
+            last_name, first_name, office,
+            asset_type, tx_type,
+            coalesce(ticker, ticker_guess) AS tkr,
+            ticker IS NULL AND ticker_guess IS NOT NULL AS tkr_recovered,
+            asset_name, amount_low, amount_high,
+            try_strptime(tx_date, '%m/%d/%Y')::DATE AS txn_date,
+            try_strptime(filed, '%m/%d/%Y')::DATE AS filed_date,
+            link
+        FROM senate_trades"""
+    )
+
+
 def main(limit=None):
     con = duckdb.connect(DB_PATH)
     con.execute(
@@ -135,8 +156,10 @@ def main(limit=None):
             filed VARCHAR, link VARCHAR, tx_date VARCHAR, owner VARCHAR,
             ticker VARCHAR, asset_name VARCHAR, asset_type VARCHAR,
             tx_type VARCHAR, amount_raw VARCHAR,
-            amount_low BIGINT, amount_high BIGINT)"""
+            amount_low BIGINT, amount_high BIGINT,
+            ticker_guess VARCHAR, ticker_guess_how VARCHAR)"""
     )
+    ensure_view(con)
     done = {r[0] for r in con.execute("SELECT DISTINCT link FROM senate_trades").fetchall()}
 
     s = _session()
@@ -162,9 +185,12 @@ def main(limit=None):
             first_name=first, last_name=last, office=office, filed=filed, link=link
         )
         con.execute(
-            "INSERT INTO senate_trades SELECT first_name, last_name, office, filed,"
+            "INSERT INTO senate_trades (first_name, last_name, office, filed,"
             " link, tx_date, owner, ticker, asset_name, asset_type, tx_type,"
-            " amount_raw, amount_low, amount_high FROM df"
+            " amount_raw, amount_low, amount_high)"
+            " SELECT first_name, last_name, office, filed, link, tx_date, owner,"
+            " ticker, asset_name, asset_type, tx_type, amount_raw, amount_low,"
+            " amount_high FROM df"
         )
         scraped += 1
         print(f"{last}, {first} — {len(rows)} txns")
