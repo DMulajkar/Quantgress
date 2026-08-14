@@ -25,6 +25,12 @@ for one JSON endpoint; no new dependency earns its keep for that. One
 request per distinct ticker prices every politician who holds it, not one
 request per position.
 
+Party is not in any Quantgress table (the disclosure forms don't carry it) --
+pulled fresh each run from the unitedstates/congress-legislators project's
+public YAML (no key, no scrape, the standard free reference for this), and
+joined on (chamber, normalized last_name). Current-members-only file, so a
+politician who's left office since it was last updated shows "Unknown".
+
 Usage:
     py networth.py --selftest         # offline checks, no network
     py networth.py --limit 20         # bounded run, price 20 tickers only
@@ -37,17 +43,23 @@ Usage:
 """
 
 import datetime
+import re
 import sys
 import time
 
 import duckdb
 import pandas as pd
 import requests
+import yaml
 
 from schema import DB_PATH
 
 CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=5y&interval=1d"
 RATE_LIMIT_SECS = 0.3  # no documented Yahoo limit; courtesy delay, same family as Phase 11/14
+
+PARTY_BASE = "https://raw.githubusercontent.com/unitedstates/congress-legislators/main/{}"
+# trades.chamber -> the legislators file's term "type" for that chamber
+CHAMBER_TERM_TYPE = {"S": "sen", "H": "rep"}
 
 POSITIONS_SQL = """
 SELECT chamber, last_name, tkr,
@@ -122,6 +134,66 @@ def _to_date(x):
     return x.date() if hasattr(x, "date") else x
 
 
+def normalize_last_name(name):
+    """"Moran,", "King, Jr.", "Hagerty, IV" -> "moran", "king", "hagerty" --
+    strips the suffix/comma artifacts already logged in the House/Senate
+    scrapers' raw last_name (see [[Quantgress]]) down to a bare surname, so
+    it matches congress-legislators' clean name.last."""
+    name = re.sub(r",?\s*(Jr\.?|Sr\.?|I{2,3}|IV|V)$", "", (name or "").strip(), flags=re.IGNORECASE)
+    return name.rstrip(",").strip().lower()
+
+
+def load_party_lookup(legislators):
+    """List of congress-legislators records -> {(chamber, norm_last_name): party}.
+
+    Keyed off each person's most recent term *per chamber type*, not just
+    their single most recent term overall -- a rep-then-senator resolves
+    correctly for both chambers instead of the House stint winning by date.
+    """
+    lookup = {}
+    for person in legislators:
+        last = normalize_last_name(person.get("name", {}).get("last"))
+        if not last:
+            continue
+        latest_by_type = {}
+        for term in person.get("terms", []):
+            t = term.get("type")
+            if t in ("sen", "rep") and term.get("party"):
+                if t not in latest_by_type or term["start"] > latest_by_type[t]["start"]:
+                    latest_by_type[t] = term
+        for chamber, term_type in CHAMBER_TERM_TYPE.items():
+            if term_type in latest_by_type:
+                lookup[(chamber, last)] = latest_by_type[term_type]["party"]
+    return lookup
+
+
+def fetch_party_lookup(s):
+    """current file first, then historical fills in whatever's missing --
+    NOT the other way around, so a currently-serving member's fresher term
+    data always wins over any past-chamber history the same person has.
+
+    Confirmed live this matters: legislators-current.yaml (as of its
+    2026-07-15 snapshot) has no entry at all for sitting Sen. Markwayne
+    Mullin -- he's only in legislators-historical.yaml. The two files don't
+    partition current-vs-retired congressmembers on any date the trades
+    data can predict, so both get fetched every run rather than guessing
+    which one a given last_name needs.
+
+    Empty dict (every politician shows "Unknown") on any failure -- party is
+    enrichment, not worth failing the whole net-worth run over.
+    """
+    lookup = {}
+    for filename in ("legislators-current.yaml", "legislators-historical.yaml"):
+        try:
+            r = s.get(PARTY_BASE.format(filename), timeout=60)
+            r.raise_for_status()
+            for key, party in load_party_lookup(yaml.safe_load(r.text)).items():
+                lookup.setdefault(key, party)
+        except (requests.exceptions.RequestException, yaml.YAMLError):
+            print(f"warning: could not fetch {filename} -- some politicians will show Unknown")
+    return lookup
+
+
 def main(limit=None, member=None):
     con = duckdb.connect(DB_PATH, read_only=True)
     positions = con.execute(POSITIONS_SQL).fetchdf()
@@ -137,6 +209,7 @@ def main(limit=None, member=None):
         positions = positions[positions["tkr"].isin(symbols)]
 
     s = _session()
+    party_lookup = fetch_party_lookup(s)
     price_cache = {}
     priced = skipped = 0
     for sym in symbols:
@@ -153,23 +226,36 @@ def main(limit=None, member=None):
             value, was_priced = pos["net_invested"] * (current / basis), True
         else:
             value, was_priced = pos["net_invested"], False  # no price data -- unadjusted floor
-        rows.append({"chamber": pos["chamber"], "last_name": pos["last_name"],
+        party = party_lookup.get((pos["chamber"], normalize_last_name(pos["last_name"])), "Unknown")
+        rows.append({"chamber": pos["chamber"], "last_name": pos["last_name"], "party": party,
                       "tkr": pos["tkr"], "net_invested": pos["net_invested"],
                       "mtm_value": round(value), "priced": was_priced})
 
     df = pd.DataFrame(rows)
     pd.set_option("display.width", 200, "display.max_columns", 50)
-    print(f"{priced} tickers priced, {skipped} had no Yahoo data (delisted/unknown symbol)\n")
+    matched = (df["party"] != "Unknown").sum()
+    print(f"{priced} tickers priced, {skipped} had no Yahoo data (delisted/unknown symbol)")
+    print(f"{df['last_name'].nunique()} politicians, {matched}/{len(df)} positions matched to a known party\n")
+
+    money = lambda x: f"${x:,.0f}"  # display-only -- keep the real numbers for the sums below
 
     if member:
         df = df.sort_values("mtm_value", ascending=False)
-        print(df.to_string(index=False))
-        print(f"\n{member} floor net worth (disclosed equities only): ${df['mtm_value'].sum():,.0f}")
+        total = df["mtm_value"].sum()
+        printable = df.assign(net_invested=df["net_invested"].map(money),
+                               mtm_value=df["mtm_value"].map(money))
+        print(printable.to_string(index=False))
+        print(f"\n{member} floor net worth (disclosed equities only): {money(total)}")
     else:
-        summary = (df.groupby(["chamber", "last_name"])["mtm_value"].sum()
+        summary = (df.groupby(["chamber", "last_name", "party"])["mtm_value"].sum()
                      .reset_index().rename(columns={"mtm_value": "net_worth_floor"})
                      .sort_values("net_worth_floor", ascending=False))
-        print(summary.to_string(index=False))
+        by_party = summary.groupby("party")["net_worth_floor"].agg(["sum", "count"])
+        by_party.columns = ["total_floor", "politicians"]
+        printable = summary.assign(net_worth_floor=summary["net_worth_floor"].map(money))
+        print(printable.to_string(index=False))
+        by_party_printable = by_party.assign(total_floor=by_party["total_floor"].map(money))
+        print(f"\n{by_party_printable.to_string()}")
 
 
 def selftest():
@@ -208,6 +294,29 @@ def selftest():
         assert _FlakyThenOK.calls == 3
     finally:
         time.sleep = real_sleep
+
+    # the four artifact shapes already observed live in real last_name values
+    assert normalize_last_name("Moran,") == "moran"
+    assert normalize_last_name("King, Jr.") == "king"
+    assert normalize_last_name("Justice, II") == "justice"
+    assert normalize_last_name("Hagerty, IV") == "hagerty"
+    assert normalize_last_name("McConnell, Jr.") == "mcconnell"
+    assert normalize_last_name("Ossoff") == "ossoff"  # no artifact -- passes through
+
+    # party lookup: picks each chamber type's most recent term independently,
+    # so a rep-then-senator resolves correctly for both, not just the newer one
+    fake_legislators = [{
+        "name": {"last": "Example"},
+        "terms": [
+            {"type": "rep", "start": "2005-01-03", "party": "Democrat"},
+            {"type": "rep", "start": "2015-01-03", "party": "Republican"},  # switched parties
+            {"type": "sen", "start": "2021-01-03", "party": "Independent"},
+        ],
+    }]
+    lookup = load_party_lookup(fake_legislators)
+    assert lookup[("H", "example")] == "Republican"   # latest House term, not the 2005 one
+    assert lookup[("S", "example")] == "Independent"
+    assert ("H", "nobody") not in lookup
 
     print("selftest ok")
 
