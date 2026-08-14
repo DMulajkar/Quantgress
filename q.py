@@ -1,6 +1,6 @@
 """Query the scraped congress trades.
 
-    py q.py                        # summary by senator
+    py q.py                        # summary by chamber + member
     py q.py --types                # what asset types exist, and how many
     py q.py --type Stock           # trades of one asset type
     py q.py --tickered             # only rows that have a ticker
@@ -11,9 +11,9 @@
 delete anything. Bonds, munis and private holdings have no ticker to have,
 so this is about 100 of 1,022 rows -- drop the flag to see them again.
 
-Query the `trades` view, not the raw `senate_trades` table -- it has the
-recovered tickers coalesced in and real DATE columns. Raw table is still there
-if you want the untouched scraped values.
+Query the `trades` view, not the raw `senate_trades` / `house_trades` tables --
+it has the recovered tickers coalesced in, real DATE columns, and both chambers.
+The raw tables are still there if you want the untouched scraped values.
 
 Exists because PowerShell mangles quotes and '%' in `py -c "..."` one-liners.
 """
@@ -25,11 +25,12 @@ import pandas as pd
 
 DB_PATH = "congress_trades.duckdb"
 
+# grouped by chamber too: last_name is not unique across the House and Senate
 SUMMARY = """
-SELECT last_name, count(*) AS txns, count(DISTINCT tkr) AS tickers,
+SELECT chamber, last_name, count(*) AS txns, count(DISTINCT tkr) AS tickers,
        min(txn_date) AS first_trade, max(txn_date) AS last_trade,
        min(filed_date) AS first_filing, max(filed_date) AS last_filing
-FROM trades GROUP BY last_name ORDER BY txns DESC
+FROM trades GROUP BY chamber, last_name ORDER BY txns DESC
 """
 
 TYPES = """

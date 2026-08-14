@@ -21,6 +21,8 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
+from schema import DB_PATH, ensure_schema, parse_amount
+
 ROOT = "https://efdsearch.senate.gov"
 LANDING = f"{ROOT}/search/home/"
 SEARCH = f"{ROOT}/search/"
@@ -29,7 +31,6 @@ REPORTS = f"{ROOT}/search/report/data/"
 START_DATE = "01/01/2012 00:00:00"
 BATCH = 100
 RATE_LIMIT_SECS = 2  # be polite to a .gov host
-DB_PATH = "congress_trades.duckdb"
 
 # ponytail: three constants beat a config.yaml here; add one if this grows knobs
 
@@ -82,14 +83,6 @@ def list_ptrs(s):
         offset += BATCH
 
 
-def parse_amount(text):
-    """'$1,001 - $15,000' -> (1001, 15000). Open-ended high returns None."""
-    nums = [int(n.replace(",", "")) for n in re.findall(r"[\d,]+", text or "")]
-    if not nums:
-        return None, None
-    return nums[0], (nums[1] if len(nums) > 1 else None)
-
-
 def parse_ptr(html):
     """Return transaction rows from a PTR page. Empty list if it has no table."""
     tables = pd.read_html(io.StringIO(html))
@@ -127,48 +120,9 @@ def parse_ptr(html):
     return out.to_dict("records")
 
 
-def ensure_view(con):
-    """The `trades` view: what you actually want to query.
-
-    Bakes in the two things every query otherwise repeats -- coalescing the
-    recovered ticker, and parsing MM/DD/YYYY strings into real DATEs so
-    ORDER BY sorts chronologically instead of lexically.
-    """
-    con.execute(
-        r"""CREATE OR REPLACE VIEW trades AS SELECT
-            last_name,
-            -- Exchange rows pack both legs into one cell ("--  AMCR" = gave up
-            -- an untickered holding, received AMCR). Take the trailing symbol,
-            -- i.e. what they hold afterwards. Plain tickers pass through.
-            coalesce(
-                nullif(nullif(regexp_extract(trim(ticker), '([A-Z.\-]+)$', 1),
-                              '--'), ''),
-                ticker_guess) AS tkr,
-            asset_name, tx_type, amount_low, amount_high,
-            try_strptime(tx_date, '%m/%d/%Y')::DATE AS txn_date,
-            try_strptime(filed, '%m/%d/%Y')::DATE AS filed_date,
-            date_diff('day', try_strptime(tx_date, '%m/%d/%Y')::DATE,
-                             try_strptime(filed, '%m/%d/%Y')::DATE) AS lag_days,
-            -- secondary columns: filtering, auditing, provenance
-            asset_type, owner,
-            ticker IS NULL AND ticker_guess IS NOT NULL AS tkr_recovered,
-            first_name, office, link
-        FROM senate_trades"""
-    )
-
-
 def main(limit=None):
     con = duckdb.connect(DB_PATH)
-    con.execute(
-        """CREATE TABLE IF NOT EXISTS senate_trades (
-            first_name VARCHAR, last_name VARCHAR, office VARCHAR,
-            filed VARCHAR, link VARCHAR, tx_date VARCHAR, owner VARCHAR,
-            ticker VARCHAR, asset_name VARCHAR, asset_type VARCHAR,
-            tx_type VARCHAR, amount_raw VARCHAR,
-            amount_low BIGINT, amount_high BIGINT,
-            ticker_guess VARCHAR, ticker_guess_how VARCHAR)"""
-    )
-    ensure_view(con)
+    ensure_schema(con)  # tables + the `trades` view, shared with scrape_house
     done = {r[0] for r in con.execute("SELECT DISTINCT link FROM senate_trades").fetchall()}
 
     s = _session()
