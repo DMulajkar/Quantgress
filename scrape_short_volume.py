@@ -130,38 +130,46 @@ def daterange(start, end):
 
 
 def main(start, end, limit=None):
+    # ponytail: con.close() in a finally -- without it the write connection's
+    # data can sit WAL-only (never checkpointed into congress_trades.duckdb)
+    # even after a clean run, and a killed/corrupted-WAL scenario later loses
+    # it. Same fix needed in every other scrape_*.py main() -- not done here,
+    # out of scope for this run.
     con = duckdb.connect(DB_PATH)
-    ensure_table(con)
-    done = {(r[0], r[1], r[2]) for r in
-             con.execute(f"SELECT trade_date, symbol, market FROM {TABLE}").fetchall()}
+    try:
+        ensure_table(con)
+        done = {(r[0], r[1], r[2]) for r in
+                 con.execute(f"SELECT trade_date, symbol, market FROM {TABLE}").fetchall()}
 
-    s = _session()
-    added = skipped = 0
-    insert_sql = (f"INSERT INTO {TABLE} (trade_date, symbol, short_volume, "
-                  f"short_exempt_volume, total_volume, market) VALUES (?, ?, ?, ?, ?, ?)")
-    print(f"{start} to {end}:")
-    for day in daterange(start, end):
-        if limit is not None and added >= limit:
-            break
-        rows = fetch_day(s, day)
-        if rows is None:
-            continue
-        new_rows = [row for row in rows
-                    if (row["trade_date"], row["symbol"], row["market"]) not in done]
-        if limit is not None:
-            new_rows = new_rows[:max(0, limit - added)]
-        for row in new_rows:
-            con.execute(insert_sql, [row[c] for c in
-                        ("trade_date", "symbol", "short_volume",
-                         "short_exempt_volume", "total_volume", "market")])
-            done.add((row["trade_date"], row["symbol"], row["market"]))
-        added += len(new_rows)
-        skipped += len(rows) - len(new_rows)
-        print(f"  {day.isoformat()}: {len(new_rows)} new, {len(rows) - len(new_rows)} already stored")
+        s = _session()
+        added = skipped = 0
+        insert_sql = (f"INSERT INTO {TABLE} (trade_date, symbol, short_volume, "
+                      f"short_exempt_volume, total_volume, market) VALUES (?, ?, ?, ?, ?, ?)")
+        print(f"{start} to {end}:")
+        for day in daterange(start, end):
+            if limit is not None and added >= limit:
+                break
+            rows = fetch_day(s, day)
+            if rows is None:
+                continue
+            new_rows = [row for row in rows
+                        if (row["trade_date"], row["symbol"], row["market"]) not in done]
+            if limit is not None:
+                new_rows = new_rows[:max(0, limit - added)]
+            for row in new_rows:
+                con.execute(insert_sql, [row[c] for c in
+                            ("trade_date", "symbol", "short_volume",
+                             "short_exempt_volume", "total_volume", "market")])
+                done.add((row["trade_date"], row["symbol"], row["market"]))
+            added += len(new_rows)
+            skipped += len(rows) - len(new_rows)
+            print(f"  {day.isoformat()}: {len(new_rows)} new, {len(rows) - len(new_rows)} already stored")
 
-    total = con.execute(f"SELECT count(*) FROM {TABLE}").fetchone()[0]
-    print(f"\n{total} short volume rows in {DB_PATH}; this run added {added},"
-          f" skipped {skipped} already-stored")
+        total = con.execute(f"SELECT count(*) FROM {TABLE}").fetchone()[0]
+        print(f"\n{total} short volume rows in {DB_PATH}; this run added {added},"
+              f" skipped {skipped} already-stored")
+    finally:
+        con.close()
 
 
 def selftest():
