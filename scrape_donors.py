@@ -6,12 +6,18 @@ alongside. Same difficulty class as Phase 12 (scrape_patents.py): the donor
 is a free-text name (`contributor_name`) with no ticker field, so it's
 another `entities.py` sec_name adapter, not a lookup table.
 
-Endpoint: /v1/schedules/schedule_a/, filtered to `is_individual=false` --
-Schedule A itemized receipts where the contributor is a committee/PAC/
+Endpoint: /v1/schedules/schedule_a/, filtered to `contributor_type=committee`
+-- Schedule A itemized receipts where the contributor is a committee/PAC/
 organization rather than a person. That's the "corporate donor" slice: a
 company's PAC giving to a candidate or party committee, not the 67M+
 individual line items FEC also carries. Committee/donor name matching, same
 as the module docstring above.
+
+# ponytail: the original build used `is_individual=false` for this filter,
+# per the (wrong) assumption that it meant "contributor is not an individual."
+# Confirmed live it does not filter by entity type at all -- see the
+# ponytail note on list_donations() below for what it actually does and what
+# the live-confirmed fix is.
 
 Usage:
     py scrape_donors.py --selftest              # offline checks, no network
@@ -79,11 +85,27 @@ def parse_record(item):
     }
 
 
+def _load_dotenv():
+    # ponytail: same stdlib .env loader as scrape_patents.py -- copy, not a
+    # shared helper, until a third phase wants one too.
+    path = os.path.join(os.path.dirname(__file__), ".env")
+    if not os.path.exists(path):
+        return
+    for line in open(path):
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        os.environ.setdefault(k.strip(), v.strip())
+
+
 def _session():
+    _load_dotenv()
     key = os.environ.get("FEC_API_KEY")
     if not key:
         sys.exit("FEC_API_KEY not set -- free instant signup at "
-                  "https://api.data.gov/signup/, then export the key before running.")
+                  "https://api.data.gov/signup/, put it in .env as "
+                  "FEC_API_KEY=<key>, or export it before running.")
     s = requests.Session()
     s.headers["User-Agent"] = "quantgress/0.1 (personal research)"
     return s, key
@@ -112,11 +134,22 @@ def list_donations(s, api_key, cycle):
     donors in the given two-year cycle. Seek-based pagination -- the
     endpoint's own docs call out cursor pagination (not page numbers) for
     this resource, via last_index/last_contribution_receipt_date echoed back
-    in the response's pagination.last_indexes."""
+    in the response's pagination.last_indexes.
+
+    # ponytail: found live -- `is_individual=false` does NOT filter out
+    # individual donors. Per FEC's own docs it's a de-dup/reporting flag (which
+    # copy of a transaction counts toward the "total from individuals" figure,
+    # since one contribution can appear multiple times across committees as an
+    # earmark), not an entity-type filter. Confirmed with a live DEMO_KEY call:
+    # is_individual=false still returned entity_type="IND" rows for real people
+    # ("LINDHOLM, CHAD", "AREVALO, JONATHAN"). `contributor_type=committee` is
+    # the actual filter -- confirmed live it returns only PAC/ORG/CCM/CAN rows,
+    # zero plain IND.
+    """
     last_index = last_date = None
     while True:
         time.sleep(RATE_LIMIT_SECS)
-        params = {"api_key": api_key, "is_individual": "false",
+        params = {"api_key": api_key, "contributor_type": "committee",
                   "two_year_transaction_period": cycle,
                   "sort": "contribution_receipt_date", "per_page": PAGE_SIZE}
         if last_index is not None:
