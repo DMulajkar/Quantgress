@@ -1,0 +1,7 @@
+# Quantgress — quarterly cron jobs
+# Install: sudo cp quantgress-quarterly /etc/cron.d/quantgress-quarterly && sudo chmod 644 /etc/cron.d/quantgress-quarterly
+# 13F and lobbying filings genuinely follow a quarterly cadence upstream.
+#
+# minute hour dom  month     dow  user     command
+     0    8    1    1,4,7,10  *   ubuntu   cd /home/ubuntu/quantgress && venv/bin/python scrape_13f.py >> logs/13f.log 2>&1
+    15    8    1    1,4,7,10  *   ubuntu   cd /home/ubuntu/quantgress && venv/bin/python scrape_lobbying.py >> logs/lobbying.log 2>&1

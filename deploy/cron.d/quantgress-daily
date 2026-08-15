@@ -1,0 +1,8 @@
+# Quantgress — daily cron jobs
+# Install: sudo cp quantgress-daily /etc/cron.d/quantgress-daily && sudo chmod 644 /etc/cron.d/quantgress-daily
+# Staggered 15 min apart so they don't all hit congress_trades.duckdb at once.
+#
+# minute hour dom month dow  user     command
+     0    6    *    *    *   ubuntu   cd /home/ubuntu/quantgress && venv/bin/python daily.py >> logs/daily.log 2>&1
+    15    6    *    *    *   ubuntu   cd /home/ubuntu/quantgress && venv/bin/python scrape_short_volume.py >> logs/short_volume.log 2>&1
+    30    6    *    *    *   ubuntu   cd /home/ubuntu/quantgress && venv/bin/python scrape_insiders.py >> logs/insiders.log 2>&1

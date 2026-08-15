@@ -1,5 +1,11 @@
 # Quantgress
 
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)
+![DuckDB](https://img.shields.io/badge/database-DuckDB-fff000.svg)
+![FastAPI](https://img.shields.io/badge/api-FastAPI-009688.svg)
+![Data](https://img.shields.io/badge/data-public%20domain-brightgreen.svg)
+
 **A self-hosted, open-source alternative to Quiver Quantitative.** Congressional stock trading disclosures plus 15 adjacent public-data feeds (lobbying, insider trades, 13F holdings, short volume, patents, campaign donations, executive pay, net worth, and more), scraped from primary government sources, normalized into a single [DuckDB](https://duckdb.org/) file, and served over a read-only REST API.
 
 Every dataset here is public U.S. government or public-domain disclosure data: SEC, Senate/House ethics offices, FEC, FINRA, USAspending, USPTO, Wikimedia. Nothing is scraped from a paid or access-controlled source.
