@@ -238,6 +238,8 @@ schtasks /create /tn "Quantgress Daily" /sc daily /st 09:00 ^
 
 STOCK Act disclosures have a 30–45 day filing window, so a daily cadence is comfortably fast enough; a missed day is invisible and self-heals on the next run.
 
+**Beyond `daily.py`:** only Phases 1-3 run on the schedule above. The other 12 phases (lobbying, contracts, insider trades, 13F, short volume, patents, donors, pageviews, exec comp, Trump trades, Senate annual disclosures) are manual-only today (`py scrape_*.py`) — a real gap once any of that data is served publicly, since a paid tier can't silently go stale. `deploy/cron.d/` has the Linux deployment schedule for the Oracle Cloud box: one `/etc/cron.d` file per cadence group (daily/weekly/quarterly/annual, grouped by each source's actual upstream update frequency, not run nightly regardless) — see [`deploy/cron.d/README.md`](deploy/cron.d/README.md) for the install steps and the full phase-to-cadence mapping. Trump trades (Phase 17) is the one deliberate exception, left manual since ProPublica's mirror has no fixed publication schedule to key a cron line off of.
+
 ## Legal & Compliance
 
 Every dataset scraped here is public government or public-domain disclosure data, legal to collect and use for personal/research purposes. **Redistributing it commercially is a separate question with real constraints, surfaced while scoping a paid public API for this project:**
