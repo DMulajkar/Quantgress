@@ -80,10 +80,15 @@ RELATIONS = {
         ("assignee_name", "ilike"), ("invention_title", "ilike"),
         ("assignee_ticker_guess", "eq_ci"),
     ], "grant_date DESC"),
-    "donors": ("corporate_donations", [
-        ("contributor_name", "ilike"), ("committee_name", "ilike"),
-        ("contributor_ticker_guess", "eq_ci"), ("cycle", "eq"),
-    ], "contribution_date DESC"),
+    # corporate_donations_agg, not the raw table: ticker/committee/cycle
+    # totals only, never a contributor_name or sub_id row -- 52 U.S.C.
+    # Sec 30111(a)(4) bars commercial use of raw FEC contributor info, see
+    # scrape_donors.py's ensure_agg_view and 03 Concepts/Quantgress API
+    # Monetization.md.
+    "donors": ("corporate_donations_agg", [
+        ("committee_name", "ilike"), ("contributor_ticker_guess", "eq_ci"),
+        ("cycle", "eq"),
+    ], "total_amount DESC"),
     "pageviews": ("pageviews", [
         ("article", "ilike"), ("date", "eq"),
     ], "date DESC"),

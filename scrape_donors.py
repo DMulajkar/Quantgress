@@ -64,6 +64,29 @@ def ensure_table(con):
         committee_id VARCHAR, committee_name VARCHAR, cycle INTEGER)""")
 
 
+def ensure_agg_view(con):
+    """Paid-tier-safe shape: company/PAC totals only, never a raw row.
+
+    52 U.S.C. Sec 30111(a)(4) bars commercial use of FEC-disclosed
+    contributor info; Quiver Quantitative's own election-contributions page
+    ships exactly this shape (ticker, total $, no contributor_name/sub_id)
+    as the aggregate-only workaround -- see 03 Concepts/Quantgress API
+    Monetization.md. api.py's "donors" route reads this view, not the raw
+    table, so contributor_name and sub_id never leave the API.
+
+    Self-ALTERs contributor_ticker_guess in first, same as scrape_13f.py's
+    f13_positions -- entities.py may not have run yet when this is called.
+    """
+    con.execute(f"ALTER TABLE {TABLE} ADD COLUMN IF NOT EXISTS contributor_ticker_guess VARCHAR")
+    con.execute(f"""
+        CREATE OR REPLACE VIEW corporate_donations_agg AS
+        SELECT contributor_ticker_guess, committee_name, cycle,
+               count(*) AS num_contributions, sum(contribution_amount) AS total_amount
+        FROM {TABLE}
+        GROUP BY contributor_ticker_guess, committee_name, cycle
+    """)
+
+
 def current_cycle(today=None):
     """FEC two-year cycles are labeled by their ending (even) year -- 2025 and
     2026 are both the '2026 cycle'. Round an odd year up."""
@@ -169,6 +192,7 @@ def list_donations(s, api_key, cycle):
 def main(cycle, limit=None):
     con = duckdb.connect(DB_PATH)
     ensure_table(con)
+    ensure_agg_view(con)
     done = {r[0] for r in con.execute(f"SELECT sub_id FROM {TABLE}").fetchall()}
 
     s, api_key = _session()
@@ -255,6 +279,23 @@ def selftest():
     finally:
         time.sleep = real_sleep
     assert len(results) == PAGE_SIZE + 1 and _TwoPages.calls == 2
+
+    # corporate_donations_agg (the "donors" route's actual source, see
+    # ensure_agg_view) never exposes contributor_name/sub_id, and its totals
+    # match the raw rows it's grouping
+    mem = duckdb.connect(":memory:")
+    ensure_table(mem)
+    ensure_agg_view(mem)
+    ins = (f"INSERT INTO {TABLE} (sub_id, contributor_name, contribution_amount, "
+           f"committee_name, cycle, contributor_ticker_guess) VALUES (?,?,?,?,?,?)")
+    mem.execute(ins, ["1", "ACME WIDGET CORP PAC", 1000.0, "FRIENDS OF JANE SMITH", 2026, "ACME"])
+    mem.execute(ins, ["2", "ACME WIDGET CORP PAC", 500.0, "FRIENDS OF JANE SMITH", 2026, "ACME"])
+    ensure_agg_view(mem)  # re-running after inserts must still just replace, not duplicate
+    cols = [d[0] for d in mem.execute("SELECT * FROM corporate_donations_agg").description]
+    assert "contributor_name" not in cols and "sub_id" not in cols
+    agg = mem.execute("SELECT total_amount, num_contributions FROM corporate_donations_agg "
+                       "WHERE contributor_ticker_guess = 'ACME'").fetchone()
+    assert agg == (1500.0, 2)
 
     print("selftest ok")
 
