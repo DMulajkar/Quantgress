@@ -37,6 +37,16 @@ Usage:
     py networth.py                    # full run, every net-positive ticker
     py networth.py --member Pelosi    # one politician's ticker breakdown
 
+--annual switches to Phase 18's accurate mode -- real net worth (assets
+minus liabilities) from each senator's Annual Financial Disclosure Report
+(scrape_senate_annual.py), not a floor reconstructed from PTR trades alone.
+Senate only, since that scraper is Senate-only; a --member outside the
+Senate returns nothing here even if they have PTR-derived numbers above.
+
+    py networth.py --annual                  # every senator with a scraped Annual Report
+    py networth.py --annual --member Britt   # one senator's asset/liability breakdown
+    py networth.py --annual --limit 20       # bounded run, price 20 tickers only
+
 # ponytail: EOD/last-close prices, not intraday -- Quiver's "hourly" needs a
 # streaming quote endpoint, a different (and more rate-limited) Yahoo path.
 # Upgrade if a live dashboard ever needs same-day price moves.
@@ -258,6 +268,107 @@ def main(limit=None, member=None):
         print(f"\n{by_party_printable.to_string()}")
 
 
+def _midpoint(low, high):
+    """Range midpoint for a disclosed asset/liability value -- unlike the
+    PTR-derived mode above (which sums amount_low, a deliberate floor over a
+    transaction bracket), an Annual Report's Value column is a real
+    snapshot as of Dec 31, so its midpoint is the more accurate read, not a
+    floor. None (undetermined-value assets, e.g. a defined-benefit pension)
+    stays None -- excluded from the sum, not silently treated as zero."""
+    if low is None:
+        return None
+    return low if high is None else (low + high) / 2
+
+
+def latest_senate_annual_reports(con):
+    """One report_id per senator -- whichever was filed most recently.
+    A same-year amendment has a later filed_date than the original it
+    amends, so it wins here with no special amendment-vs-original logic."""
+    reports = con.execute("""
+        SELECT DISTINCT report_id, last_name, first_name, filing_label, filing_year, filed_date
+        FROM fd_assets
+    """).fetchdf()
+    if reports.empty:
+        return reports
+    reports["_filed"] = pd.to_datetime(reports["filed_date"], format="%m/%d/%Y")
+    return (reports.sort_values("_filed")
+                    .groupby("last_name", as_index=False).tail(1)
+                    .drop(columns="_filed"))
+
+
+def annual_main(limit=None, member=None):
+    con = duckdb.connect(DB_PATH, read_only=True)
+    reports = latest_senate_annual_reports(con)
+    if member:
+        reports = reports[reports["last_name"].str.contains(member, case=False)]
+    if reports.empty:
+        print("no Annual Financial Disclosure Report on file" + (f" for {member!r}" if member else "")
+              + " -- run scrape_senate_annual.py first")
+        return
+
+    ids = list(reports["report_id"])
+    year_by_report = dict(zip(reports["report_id"], reports["filing_year"]))
+    assets = con.execute("SELECT * FROM fd_assets WHERE report_id = ANY(?)", [ids]).fetchdf()
+    liabilities = con.execute("SELECT * FROM fd_liabilities WHERE report_id = ANY(?)", [ids]).fetchdf()
+
+    symbols = sorted(assets.loc[assets["ticker"].notna(), "ticker"].unique())
+    if limit is not None:
+        symbols = symbols[:limit]
+
+    s = _session()
+    party_lookup = fetch_party_lookup(s)
+    price_cache = {sym: fetch_prices(s, sym) for sym in symbols}
+    priced = sum(c is not None for c, _ in price_cache.values())
+
+    money = lambda x: f"${x:,.0f}"
+    rows, line_rows, undetermined = [], [], 0
+    for report_id, group in assets.groupby("report_id"):
+        last_name, first_name = group["last_name"].iloc[0], group["first_name"].iloc[0]
+        basis_date = datetime.date(int(year_by_report[report_id]), 12, 31)
+        party = party_lookup.get(("S", normalize_last_name(last_name)), "Unknown")
+        total_assets = 0
+        for _, a in group.iterrows():
+            mid = _midpoint(a["value_low"], a["value_high"])
+            if mid is None:
+                undetermined += 1
+                continue
+            if a["ticker"] in price_cache:
+                current, series = price_cache[a["ticker"]]
+                basis = nearest_price(series, basis_date)
+                if current is not None and basis:
+                    mid = mid * (current / basis)
+            total_assets += mid
+            if member:
+                line_rows.append({"asset_name": a["asset_name"], "asset_type": a["asset_type"],
+                                   "owner": a["owner"], "value_raw": a["value_raw"], "value": round(mid)})
+        liab_rows = liabilities[liabilities["report_id"] == report_id]
+        total_liab = sum(_midpoint(l["value_low"], l["value_high"]) or 0 for _, l in liab_rows.iterrows())
+        rows.append({"last_name": last_name, "first_name": first_name, "party": party,
+                      "filing_label": group["filing_label"].iloc[0],
+                      "total_assets": round(total_assets), "total_liabilities": round(total_liab),
+                      "net_worth": round(total_assets - total_liab)})
+
+    df = pd.DataFrame(rows).sort_values("net_worth", ascending=False)
+    pd.set_option("display.width", 200, "display.max_columns", 50)
+    print(f"{priced}/{len(symbols)} tickers priced, {undetermined} asset lines excluded"
+          f" (undetermined value, e.g. a defined-benefit pension with no stated dollar figure)\n")
+
+    if member:
+        line_df = pd.DataFrame(line_rows).sort_values("value", ascending=False)
+        line_df["value"] = line_df["value"].map(money)
+        print(line_df.to_string(index=False))
+        row = df.iloc[0]
+        print(f"\n{row.last_name} ({row.party}), {row.filing_label}:"
+              f" assets {money(row.total_assets)} - liabilities {money(row.total_liabilities)}"
+              f" = net worth {money(row.net_worth)}")
+    else:
+        printable = df.assign(total_assets=df["total_assets"].map(money),
+                               total_liabilities=df["total_liabilities"].map(money),
+                               net_worth=df["net_worth"].map(money))
+        print(printable[["last_name", "party", "filing_label", "total_assets",
+                          "total_liabilities", "net_worth"]].to_string(index=False))
+
+
 def selftest():
     fake = {"chart": {"result": [{
         "meta": {"regularMarketPrice": 150.0},
@@ -318,6 +429,12 @@ def selftest():
     assert lookup[("S", "example")] == "Independent"
     assert ("H", "nobody") not in lookup
 
+    # Phase 18: midpoint (not floor) for a real disclosed value snapshot,
+    # and None (undetermined value) stays None rather than becoming 0
+    assert _midpoint(100001, 250000) == 175000.5
+    assert _midpoint(50001, None) == 50001    # open-ended top bracket -- no high to average with
+    assert _midpoint(None, None) is None      # "Undetermined" (e.g. a DB pension) -- excluded, not zero
+
     print("selftest ok")
 
 
@@ -330,4 +447,5 @@ if __name__ == "__main__":
         selftest()
     else:
         n = arg("--limit")
-        main(limit=int(n) if n else None, member=arg("--member"))
+        fn = annual_main if "--annual" in sys.argv else main
+        fn(limit=int(n) if n else None, member=arg("--member"))
