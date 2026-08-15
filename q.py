@@ -23,6 +23,12 @@ import sys
 import duckdb
 import pandas as pd
 
+# Windows' console codepage can't display some characters DocumentCloud's OCR
+# left behind in Phase 17's data (stray U+FFFD replacement chars etc.) --
+# without this, printing them crashes the whole query instead of just
+# showing a substitute character.
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 DB_PATH = "congress_trades.duckdb"
 
 # grouped by chamber too: last_name is not unique across the House and Senate

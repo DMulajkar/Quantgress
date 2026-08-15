@@ -231,6 +231,30 @@ def ensure_tables(con):
         tx_type VARCHAR, tx_date VARCHAR, notified_late BOOLEAN,
         amount_raw VARCHAR, amount_low BIGINT, amount_high BIGINT,
         filed VARCHAR, link VARCHAR)""")
+    # Two independent tells for "don't trust this row":
+    #  1. A description with a stray '$' in it absorbed another failed row's
+    #     leftover text (see parse_text) -- a clean single-transaction
+    #     description never has one, since the real amount lives in
+    #     amount_low/amount_high, not the text.
+    #  2. An amount_low that isn't one of the 10 real Schedule B bracket
+    #     floors means the amount itself got OCR-mangled (parse_amount_ocr's
+    #     fallback path), independent of whether the description is clean.
+    # asset_class is best-effort (Schedule B has no asset-type field at all,
+    # unlike the House form) -- a coupon-rate '%' in the description is a
+    # decent bond/note tell, but a mangled coupon ("0S37S'Xi" for "05.375%")
+    # won't match, so the fallback bucket is "couldn't tell," not "equity."
+    con.execute("""
+        CREATE OR REPLACE VIEW trump_trades_clean AS
+        SELECT try_strptime(tx_date, '%m/%d/%Y')::DATE AS txn_date,
+               tx_type, amount_low, amount_high, notified_late,
+               CASE WHEN regexp_matches(description, '[0-9](\\.[0-9]+)?\\s*%')
+                    THEN 'Bond/Note' ELSE 'Unclassified' END AS asset_class,
+               description, doc_id, filed, link
+        FROM trump_trades
+        WHERE description NOT LIKE '%$%'
+          AND amount_low IN (1001, 15001, 50001, 100001, 250001, 500001,
+                              1000001, 5000001, 25000001, 50000001)
+    """)
 
 
 def main(limit=None, filer=PERSON):
