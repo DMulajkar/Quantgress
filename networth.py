@@ -274,10 +274,17 @@ def _midpoint(low, high):
     transaction bracket), an Annual Report's Value column is a real
     snapshot as of Dec 31, so its midpoint is the more accurate read, not a
     floor. None (undetermined-value assets, e.g. a defined-benefit pension)
-    stays None -- excluded from the sum, not silently treated as zero."""
-    if low is None:
+    stays None -- excluded from the sum, not silently treated as zero.
+
+    DuckDB's fetchdf() returns nullable BIGINT columns as pandas Int64,
+    whose missing values are pd.NA, not Python None -- `low is None` alone
+    misses that and produces a pd.NA that poisons every sum downstream.
+    pd.isna() catches both a scalar None (selftest's plain-Python inputs)
+    and pd.NA (real DataFrame rows) in one check.
+    """
+    if pd.isna(low):
         return None
-    return low if high is None else (low + high) / 2
+    return low if pd.isna(high) else (low + high) / 2
 
 
 def latest_senate_annual_reports(con):
