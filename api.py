@@ -34,15 +34,37 @@ columns -- filing_year, cycle, fiscal_year, cik).
 
 import duckdb
 from fastapi import Depends, FastAPI, HTTPException, Request
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from slowapi.util import get_remote_address
 
 from auth import init_db, require_key
 
 DB_PATH = "congress_trades.duckdb"
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 1000
+# ponytail: one limit for everyone, no tier differentiation -- auth.py already
+# stores a `tier` column for when Quantgress API Monetization's paid tiers
+# and Stripe billing actually exist; revisit this constant then.
+RATE_LIMIT = "500/day"
+
+
+def _rate_limit_key(request: Request) -> str:
+    """Rate-limit by API key, not IP -- an office/NAT of legitimate users
+    shouldn't share one bucket, and a key is the unit a future tier applies
+    to. Falls back to IP for the pre-auth case, so a request with no/bad key
+    is still capped before it ever reaches auth.require_key's 401 --
+    otherwise key-guessing has no rate limit of its own."""
+    return request.headers.get("x-api-key") or get_remote_address(request)
+
 
 init_db()  # idempotent -- creates api_keys table if missing
+limiter = Limiter(key_func=_rate_limit_key, default_limits=[RATE_LIMIT], headers_enabled=True)
 app = FastAPI(title="Quantgress API", dependencies=[Depends(require_key)])
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
 
 # name -> (relation, [(column, mode)], default ORDER BY)
 # mode: "eq" exact, "eq_ci" case-insensitive exact (tickers/symbols/codes
@@ -265,6 +287,27 @@ def selftest():
     r = c.get("/trades?tkr=aapl&limit=5")
     assert r.status_code == 200
     assert all(row["tkr"] == "AAPL" for row in r.json())
+
+    # Rate limiting: verify the *mechanism* (Limiter + SlowAPIMiddleware +
+    # key_func + 429 handler) actually triggers, using a throwaway 2/minute
+    # limit on a standalone app -- not the real RATE_LIMIT, which would take
+    # hundreds of requests in a test to exhaust.
+    # slowapi introspects the key_func's parameter *name* -- it must be
+    # literally "request" (not just Request-typed) or slowapi calls it with
+    # zero args and TypeErrors. Matches _rate_limit_key's real signature.
+    test_limiter = Limiter(key_func=lambda request: "selftest", default_limits=["2/minute"])
+    test_app = FastAPI()
+    test_app.state.limiter = test_limiter
+    test_app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    test_app.add_middleware(SlowAPIMiddleware)
+
+    @test_app.get("/ping")
+    def _ping():
+        return {"ok": True}
+
+    tc = TestClient(test_app)
+    codes = [tc.get("/ping").status_code for _ in range(3)]
+    assert codes == [200, 200, 429], f"rate limit wiring broken: {codes}"
 
     r = c.get("/ticker/aapl?limit=5")
     if r.status_code == 200:
