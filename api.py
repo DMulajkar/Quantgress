@@ -98,9 +98,12 @@ RELATIONS = {
         ("cusip", "eq"), ("issuer_ticker_guess", "eq_ci"),
         ("period_of_report", "eq"),
     ], "rank ASC"),
-    "short-volume": ("short_volume", [
-        ("symbol", "eq_ci"), ("trade_date", "eq"), ("market", "eq"),
-    ], "trade_date DESC"),
+    # short_volume deliberately not exposed here -- FINRA API Terms of
+    # Service Sec 3.3(a)/(e) bar redistributing Licensed Materials to
+    # non-Authorized Users or "bulk distributor" use, which a public API
+    # matches directly. See 03 Concepts/Quantgress API Monetization.md's
+    # Open Questions. scrape_short_volume.py / the short_volume table stay
+    # for personal querying -- only the public HTTP route is cut.
     "patents": ("patents", [
         ("assignee_name", "ilike"), ("invention_title", "ilike"),
         ("assignee_ticker_guess", "eq_ci"),
