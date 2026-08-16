@@ -1,11 +1,11 @@
 """Phase 5b: API key gate in front of api.py.
 
-Minimal check before the server is reachable from the internet: every route
-requires a valid, unrevoked key in the X-API-Key header. Rate limiting,
-tiers, Stripe billing, and the signup website are still just plans (03
-Concepts/Quantgress API Monetization.md, Quantgress API Key Portal.md) --
-this only answers "is this a real key", so keys can be handed out manually
-(email the raw value) before that portal exists.
+Every route on the `router` in api.py (i.e. everything except POST /signup)
+requires a valid, unrevoked key in the X-API-Key header. `signup()` backs
+the public self-serve form on the marketing site; `issue_key()` is the
+lower-level primitive it (and manual CLI issuance) builds on. Tiers and
+Stripe billing are still just plans (03 Concepts/Quantgress API
+Monetization.md, Quantgress API Key Portal.md).
 
     py auth.py issue someone@example.com     # create + print a key (once)
     py auth.py revoke <raw key>               # disable a key
@@ -63,6 +63,28 @@ def issue_key(email, tier="free"):
     finally:
         con.close()
     return raw
+
+
+def signup(email):
+    """Self-serve signup path (POST /signup in api.py): one active key per
+    email. Keys are shown once and never re-displayed, so letting the same
+    email mint a second key would just orphan the first with no way back to
+    it -- fail instead.
+    # ponytail: check-then-insert has a tiny race under a concurrent double
+    # -submit of the same email (worst case: two keys for one person,
+    # harmless). Add a UNIQUE constraint if that ever actually matters.
+    """
+    con = duckdb.connect(DB_PATH)
+    try:
+        ensure_keys_table(con)
+        existing = con.execute(
+            "SELECT 1 FROM api_keys WHERE email = ? AND revoked_at IS NULL", [email]
+        ).fetchone()
+    finally:
+        con.close()
+    if existing:
+        raise ValueError("email already has an active key")
+    return issue_key(email)
 
 
 def revoke_key(raw_key):

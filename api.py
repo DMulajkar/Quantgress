@@ -24,6 +24,10 @@ Endpoints:
     GET /ticker/{symbol}      one ticker's trades
     GET /{dataset}            generic listing -- see RELATIONS keys below for
                                every other table/view and its filter columns
+    POST /signup              public, no key needed -- {"email": ...} in, a
+                               real API key out (5/day per IP, one active key
+                               per email). Everything else above requires
+                               X-API-Key.
 
 Every dataset route takes ?limit=&offset=, plus whatever filter columns are
 listed for it in RELATIONS. eq_ci filters (tickers/symbols) are
@@ -33,13 +37,16 @@ columns -- filing_year, cycle, fiscal_year, cik).
 """
 
 import duckdb
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 
-from auth import init_db, require_key
+from auth import init_db, require_key, revoke_key
+from auth import signup as auth_signup
 
 DB_PATH = "congress_trades.duckdb"
 DEFAULT_LIMIT = 100
@@ -48,6 +55,8 @@ MAX_LIMIT = 1000
 # stores a `tier` column for when Quantgress API Monetization's paid tiers
 # and Stripe billing actually exist; revisit this constant then.
 RATE_LIMIT = "500/day"
+SIGNUP_RATE_LIMIT = "5/day"  # stricter -- public, unauthenticated, mints a real key
+MARKETING_ORIGIN = "https://quantgress.dhruvmulajkar.me"  # only origin allowed to call /signup from a browser
 
 
 def _rate_limit_key(request: Request) -> str:
@@ -61,10 +70,18 @@ def _rate_limit_key(request: Request) -> str:
 
 init_db()  # idempotent -- creates api_keys table if missing
 limiter = Limiter(key_func=_rate_limit_key, default_limits=[RATE_LIMIT], headers_enabled=True)
-app = FastAPI(title="Quantgress API", dependencies=[Depends(require_key)])
+app = FastAPI(title="Quantgress API")
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
+app.add_middleware(
+    CORSMiddleware, allow_origins=[MARKETING_ORIGIN], allow_methods=["POST"], allow_headers=["Content-Type"],
+)
+
+# Every data route requires a key (Depends(require_key) below); POST /signup
+# is the one public exception, so it lives on the bare `app`, not this
+# router -- FastAPI's app-level `dependencies=` has no per-route opt-out.
+router = APIRouter(dependencies=[Depends(require_key)])
 
 # name -> (relation, [(column, mode)], default ORDER BY)
 # mode: "eq" exact, "eq_ci" case-insensitive exact (tickers/symbols/codes
@@ -197,7 +214,7 @@ def list_dataset(dataset, query_params):
         con.close()
 
 
-@app.get("/")
+@router.get("/")
 def root():
     con = _connect()
     try:
@@ -210,7 +227,7 @@ def root():
         con.close()
 
 
-@app.get("/politician/{name}")
+@router.get("/politician/{name}")
 def politician(name: str, limit: int = DEFAULT_LIMIT):
     con = _connect()
     try:
@@ -231,7 +248,7 @@ def politician(name: str, limit: int = DEFAULT_LIMIT):
         con.close()
 
 
-@app.get("/ticker/{symbol}")
+@router.get("/ticker/{symbol}")
 def ticker(symbol: str, limit: int = DEFAULT_LIMIT):
     con = _connect()
     try:
@@ -247,9 +264,32 @@ def ticker(symbol: str, limit: int = DEFAULT_LIMIT):
         con.close()
 
 
-@app.get("/{dataset}")
+@router.get("/{dataset}")
 def dataset_route(dataset: str, request: Request):
     return list_dataset(dataset, dict(request.query_params))
+
+
+app.include_router(router)
+
+
+class SignupRequest(BaseModel):
+    email: str
+
+
+@app.post("/signup")
+@limiter.limit(SIGNUP_RATE_LIMIT)
+def signup_route(request: Request, response: Response, body: SignupRequest):
+    """Public, unauthenticated -- the marketing site's key-signup form posts
+    here. Issues a real key in the same api_keys table require_key checks,
+    so there's exactly one source of truth for what's valid."""
+    email = body.email.strip().lower()
+    if "@" not in email or "." not in email.rsplit("@", 1)[-1]:
+        raise HTTPException(400, "invalid email")
+    try:
+        key = auth_signup(email)
+    except ValueError:
+        raise HTTPException(409, "that email already has an active key -- keys aren't re-shown, contact support if lost")
+    return {"api_key": key}
 
 
 def selftest():
@@ -318,7 +358,26 @@ def selftest():
     else:
         assert r.status_code == 404
 
-    print("selftest OK --", len(RELATIONS), "datasets +", 3, "named routes")
+    # /signup: public (no X-API-Key needed), issues a real, usable key, and
+    # rejects a second signup for the same email. Revoke at the end so
+    # re-running selftest against the same DB file stays idempotent.
+    public = TestClient(app)
+    r = public.get("/")
+    assert r.status_code == 401  # confirms /signup's lack of a key requirement is the exception, not a general gate hole
+
+    r = public.post("/signup", json={"email": "signup-selftest@example.com"})
+    assert r.status_code == 200, r.text
+    new_key = r.json()["api_key"]
+    assert TestClient(app, headers={"X-API-Key": new_key}).get("/").status_code == 200
+
+    r = public.post("/signup", json={"email": "signup-selftest@example.com"})
+    assert r.status_code == 409, r.text
+
+    assert public.post("/signup", json={"email": "not-an-email"}).status_code == 400
+
+    revoke_key(new_key)
+
+    print("selftest OK --", len(RELATIONS), "datasets +", 3, "named routes + /signup")
 
 
 if __name__ == "__main__":
