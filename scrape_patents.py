@@ -15,13 +15,9 @@ Usage:
 Re-running skips `application_number`s already stored, so an interrupted run
 resumes -- same pattern as every other date-range scraper here.
 
-# ponytail: this file has NOT been exercised against the live API -- this
-# session's network egress is blocked to api.uspto.gov (same as the block on
-# finra.org, data.uspto.gov, etc.), so the request shape below is built from
-# the published OpenAPI spec and third-party client docs, not a live call.
-# Treat the query syntax (`q=field:value`) as the part most likely to need a
-# live-run correction, exactly the shape of Phase 6/9's "Correction" notes --
-# it just hasn't been written yet because it hasn't run yet.
+# Confirmed live 2026-08-16 (full-scrape run on the Oracle server): the
+# request shape and query syntax (`q=field:value`) were right, but deep
+# pagination on a busy grant day 413s -- see the 404/413 handling in _get.
 
 # ponytail: unlike every prior data.gov-adjacent source (LDA, USAspending,
 # SEC), this one gates on a real API key, not just a User-Agent string --
@@ -138,7 +134,13 @@ def _get(s, params, tries=4):
             continue
         if r.status_code == 200:
             return r
-        if r.status_code == 404:
+        if r.status_code in (404, 413):
+            # 404: no matching records for this query (legit, see above).
+            # 413: found live, not in USPTO's docs -- ODP's search index
+            # apparently caps how deep one query can paginate; hit at
+            # offset=1400 on a single (heavy) grant day. Same "stop, don't
+            # fail" treatment as 404 -- missing the tail past the cap beats
+            # crashing the whole multi-day run over one busy Tuesday.
             return None
         if attempt == tries - 1:
             r.raise_for_status()
@@ -288,6 +290,18 @@ def selftest():
 
     results = list(list_applications(_NoResults(), datetime.date(2026, 1, 1)))
     assert results == [] and _NoResults.calls == 1
+
+    # 413 ("query paginated too deep", found live 2026-08-16 at offset=1400)
+    # gets the same no-retry stop as 404, not a crash
+    class _TooDeep:
+        calls = 0
+
+        def get(self, *a, **k):
+            _TooDeep.calls += 1
+            return type("R", (), {"status_code": 413})()
+
+    results = list(list_applications(_TooDeep(), datetime.date(2026, 8, 11)))
+    assert results == [] and _TooDeep.calls == 1
 
     print("selftest ok")
 

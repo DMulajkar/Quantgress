@@ -2,7 +2,12 @@
 # Install: sudo cp quantgress-weekly /etc/cron.d/quantgress-weekly && sudo chmod 644 /etc/cron.d/quantgress-weekly
 # Sources with no fixed upstream cadence; weekly is a cheap safety margin, not a real deadline.
 #
+# scrape_pageviews.py deliberately NOT scheduled here: it takes an explicit
+# --article watchlist (no ticker->Wikipedia-title mapping exists yet -- see
+# its own module docstring), so calling it with no args just 500s the same
+# "usage: ..." error every week. Run it by hand with --article once a
+# watchlist exists, or wire it in here once Phase 8 grows one.
+#
 # minute hour dom month dow  user     command
      0    7    *    *    0   ubuntu   cd /home/ubuntu/quantgress && venv/bin/python scrape_contracts.py >> logs/contracts.log 2>&1
     15    7    *    *    0   ubuntu   cd /home/ubuntu/quantgress && venv/bin/python scrape_patents.py >> logs/patents.log 2>&1
-    30    7    *    *    0   ubuntu   cd /home/ubuntu/quantgress && venv/bin/python scrape_pageviews.py >> logs/pageviews.log 2>&1
