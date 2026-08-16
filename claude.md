@@ -18,10 +18,10 @@ Congress trades first, then the rest of the [[Quiver Quant API - Dataset Catalog
 - Phase 7 — government contracts. ✅ DONE
 - Phase 8 — entity resolution refactor. ✅ DONE
 - Phase 9 — insider trades (Form 4). ✅ DONE
-- Phase 10 — 13F holdings, changes, top shareholders. *pending*
-- Phase 11 — off-exchange short volume. *pending*
-- Phase 12 — patents. *pending*
-- Phase 13 — corporate donors. *pending*
+- Phase 10 — 13F holdings, changes, top shareholders. ✅ DONE
+- Phase 11 — off-exchange short volume. ✅ DONE
+- Phase 12 — patents. ✅ DONE (built, not yet exercised against the live API -- see below)
+- Phase 13 — corporate donors. ✅ DONE (built, not yet exercised against the live API -- see below)
 - Phase 14 — Wikipedia pageviews. ✅ DONE (built out of order, before 8–13)
 
 Ordering note: phases are ordered cheapest-first, with **one exception — Phase 8 is a refactor that blocks everything after it, so it is not skippable for convenience.** Phase 14 breaks the order deliberately (see below).
@@ -166,23 +166,162 @@ Sequenced ahead of the name-matched datasets because CIK → ticker is a lookup 
 
 **Scope cut in v1:** only Table I (non-derivative) transactions — the actual reported buy/sell of the underlying stock. Table II (derivatives: options, RSUs, swaps) and the two holdings-only tables are a different, more complex signal and are left out.
 
-## Phase 10 — 13F holdings, changes, top shareholders — *pending*
+## Phase 10 — 13F holdings, changes, top shareholders — ✅ DONE
 
-One SEC pipeline, three Quiver datasets: raw holdings, the quarter-over-quarter diff, and the same data pivoted by issuer. Best datasets-per-unit-effort in the whole catalog.
+**Module:** `scrape_13f.py`
 
-**Gotchas:** quarterly refresh — does **not** belong on the Phase 4 daily cron.
+One SEC pipeline, three Quiver datasets: raw holdings, the quarter-over-quarter diff, and the same data pivoted by issuer (top shareholders). Best datasets-per-unit-effort in the whole catalog — built as **one scraped table plus two SQL views**, not three scraped tables: `f13_holdings` is the only thing pulled over the network; `f13_changes` and `f13_top_holders` are `CREATE OR REPLACE VIEW`s computed over it, same "the view is what you query" posture `schema.py`'s `trades` view established in Phase 1.
 
-## Phase 11 — off-exchange short volume — *pending*
+Same bulk-quarterly-zip shape as Phase 9 — SEC's Form 13F structured data sets, one zip of tab-delimited tables (`SUBMISSION`, `COVERPAGE`, `INFOTABLE`) per quarter, joined on `ACCESSION_NUMBER`.
 
-FINRA daily files, fixed-layout, posted by 6pm ET on the trade date. Genuinely daily — the first dataset here that rewards the cron (unlike Phase 10).
+```
+py scrape_13f.py --selftest              # offline checks, no network
+py scrape_13f.py --quarter 2026q1 --limit 50   # bounded backfill
+py scrape_13f.py --quarter 2026q1        # one quarter, full
+py scrape_13f.py                         # latest posted quarter
+```
 
-## Phase 12 — patents — *pending*
+Re-running skips `(accession_number, infotable_sk)` already stored.
 
-USPTO Open Data Portal. First dataset with no clean key at all: assignee name → ticker. The real test of Phase 8.
+**Scope cut in v1:** bulk-only, no "live" EDGAR-daily mode like Phase 9's. 13F is inherently quarterly (45-day deadline after quarter-end) and — per the gotcha below — deliberately doesn't belong on the Phase 4 daily cron, so there's no "gap since the last bulk zip" to fill on a tight cadence the way Phase 9's Form 4 stream needs.
 
-## Phase 13 — corporate donors — *pending*
+**Ticker resolution:** unlike Phase 9 (where the ticker sits right next to the CIK), 13F's `INFOTABLE` has no ticker/symbol field at all — only free-text `issuer_name` and a CUSIP. Registered as a new `entities.py` `sec_name` adapter, same strategy as Phase 6/7's `client_name`/`recipient_name`; no new resolution logic needed.
 
-OpenFEC. Committee/donor name matching, same difficulty class as Phase 12, and it closes the political-money loop opened in Phase 6 — donations in, lobbying out, trades alongside.
+**Gotchas:**
+- Quarterly refresh — does **not** belong on the Phase 4 daily cron.
+- SEC's bulk `VALUE` column is reported in **thousands of dollars**. Stored here already scaled to `value_usd` so nothing downstream has to remember it.
+- `13F-NT` (notice-only — the manager reports no holdings itself, another manager files on its behalf) submissions are dropped; only `SUBMISSIONTYPE` starting `13F-HR` (original or `/A` amendment) ever has real `INFOTABLE` rows.
+- `f13_changes` cannot flag a fully **exited** position: 13F never reports a zero-share row, a dropped holding just stops appearing in the next filing. Spotting that needs anti-joining every manager's full history each quarter — left as a known gap, documented rather than silently missing (same posture as Phase 2's OCR path).
+- An amendment (`13F-HR/A`) gets its own `accession_number` and is kept as its own row in `f13_holdings` — same "as filed" posture as every other phase's raw table. The views collapse this: `f13_positions` (the shared base of both) picks the most-recently-filed accession per manager/cusip/quarter, so an amendment supersedes the original it corrects in `f13_changes`/`f13_top_holders` without deleting the original row.
+
+## Phase 11 — off-exchange short volume — ✅ DONE
+
+**Module:** `scrape_short_volume.py`
+
+FINRA's daily Reg SHO short sale volume files, posted by 6pm ET on the trade
+date. One pipe-delimited file per day (`CNMSshvol{YYYYMMDD}.txt`) — the
+consolidated figure across every off-exchange venue (ADF + the Nasdaq/NYSE
+TRFs) for each NMS-listed symbol. "Off-exchange" is the point: these are
+trades that never printed to a listing exchange's own tape.
+
+```
+py scrape_short_volume.py --selftest              # offline checks, no network
+py scrape_short_volume.py --days 30                # last 30 trade dates
+py scrape_short_volume.py --start 2026-01-01 --end 2026-01-31 --limit 500
+py scrape_short_volume.py                          # last 5 days, unbounded
+```
+
+Re-running skips `(trade_date, symbol, market)` rows already stored, so an
+interrupted run resumes.
+
+Genuinely daily — the first dataset here that rewards the cron (unlike
+Phase 10) — so it's the first non-congress source added to `daily.py`.
+
+**No `entities.py` resolution needed:** `Symbol` is already a real exchange
+ticker straight from FINRA, not a free-text name to match — same shortcut
+Phase 9 found for CIK-adjacent tickers.
+
+**Gotchas:**
+- Weekends never hit the network (markets closed, no file exists); a weekday
+  404 (holiday, or today's file not posted by 6pm ET yet) is a legitimate
+  response, same as `scrape_pageviews.py`'s article lookups — not retried.
+- "Fixed-layout" in FINRA's own docs means a fixed *file naming/column*
+  layout, not fixed-width text — the body is pipe-delimited.
+
+## Phase 12 — patents — ✅ DONE (built, not yet exercised live -- see below)
+
+**Module:** `scrape_patents.py`
+
+USPTO Open Data Portal (ODP), `patent/applications/search`, queried one
+grant-date at a time. First dataset with no clean key at all: `assignee_name`
+→ ticker, free text off the grant record, same shape as lobbying/contracts --
+the real test of Phase 8's `sec_name` adapter, now registered for it in
+`entities.py`.
+
+```
+py scrape_patents.py --selftest                  # offline checks, no network
+py scrape_patents.py --days 30                    # last 30 calendar days
+py scrape_patents.py --start 2026-01-01 --end 2026-01-31 --limit 500
+py scrape_patents.py                              # last 10 days, unbounded
+```
+
+Re-running skips `application_number`s already stored.
+
+**Assignee, not applicant:** a patent's first applicant is often just the
+inventor, not the entity that owns it. `pick_assignee()` prefers a recorded
+assignment's `assigneeNameText` and only falls back to `firstApplicantName`
+when no assignment is on file yet -- same trust ordering Phase 8 already
+uses (a direct signal beats an inferred one).
+
+**Correction (2026-08-14, before a live run):** this module was built with
+`api.uspto.gov` unreachable from the dev environment (same network-egress
+block hit on finra.org, data.uspto.gov, etc.), so unlike every other phase
+here it has **not** been confirmed against a live response. The request
+shape (`GET .../search?q=applicationMetaData.grantDate:{date}&offset=&limit=`)
+is built from the published OpenAPI spec and third-party client docs, not a
+live call -- treat the query syntax as the most likely thing to need a
+follow-up fix once it actually runs, same spirit as Phase 6's post-build
+correction.
+
+**Gotchas:**
+- Needs a real API key, not just a User-Agent string like the other
+  data.gov-adjacent sources: free MyUSPTO account + ID.me verification, then
+  `USPTO_API_KEY` in the environment as the `X-API-Key` header.
+- Patents are only granted on Tuesdays, so most days in a range come back
+  empty -- that's expected, not a bug. Default window is 10 days (not
+  Phase 7's 7) to always cover at least one grant day with slack.
+- `PAGE_SIZE = 100` is an unconfirmed guess -- ODP's own documented default
+  page size is 25 when no `limit` is given; a live run may need a lower cap.
+
+## Phase 13 — corporate donors — ✅ DONE (built, not yet exercised live -- see below)
+
+**Module:** `scrape_donors.py`
+
+OpenFEC `/schedules/schedule_a/`, filtered to `contributor_type=committee` --
+Schedule A itemized receipts where the contributor is a committee/PAC/
+organization, not a person. That's the "corporate donor" slice, closing the
+political-money loop opened in Phase 6: donations in, lobbying out, congress
+trades alongside.
+`contributor_name` is committee/donor free text with no ticker field, same
+difficulty class as Phase 12 -- another `entities.py` sec_name adapter.
+
+```
+py scrape_donors.py --selftest              # offline checks, no network
+py scrape_donors.py --limit 20                # bounded run, current cycle
+py scrape_donors.py --cycle 2024               # one two-year FEC cycle
+py scrape_donors.py --cycle 2024 --limit 500
+py scrape_donors.py                            # current cycle, unbounded
+```
+
+Re-running skips `sub_id`s already stored. Scoped by FEC's own two-year cycle
+(labeled by its ending even year) rather than a date window, the same way
+Phase 6 scopes lobbying by calendar year -- one cycle is already the natural
+unit FEC data is filed and reported in.
+
+**Correction (2026-08-14, before a live run):** built with `api.open.fec.gov`
+unreachable from the dev environment (same block hit on finra.org and
+api.uspto.gov), so the request shape -- endpoint, filter params, and the
+seek-based `last_index`/`last_contribution_receipt_date` pagination cursor
+-- comes from the public `fecgov/openFEC` source on GitHub, not a live call.
+Flagging this the same way as Phase 12, not pretending it's confirmed.
+
+**Correction (2026-08-14, after a live run):** the original build filtered on
+`is_individual=false`, assuming it meant "contributor is not an individual."
+Confirmed live it does not filter by entity type at all -- it's FEC's
+de-dup/reporting flag (which copy of an earmarked transaction counts toward
+the "total from individuals" figure), and a live DEMO_KEY call still returned
+`entity_type="IND"` rows for real people. `contributor_type=committee` is the
+actual entity-type filter; confirmed live it returns only PAC/ORG/CCM/CAN
+rows, zero plain IND. The module now uses that.
+
+**Gotchas:**
+- Needs an OpenFEC API key (`FEC_API_KEY`), but unlike Phase 12's USPTO gate
+  this is a free, instant `api.data.gov` signup with no ID.me step.
+- Expect a lower `entities.py` hit rate than Phase 6/7/12: `contributor_name`
+  arrives as a PAC name (`"ACME WIDGET CORP PAC"`), and `normalize_name`'s
+  legal-suffix stripping doesn't yet know "PAC" / "POLITICAL ACTION
+  COMMITTEE" the way it knows "INC" / "CORP" — most rows will likely go
+  unmatched (dropped, not guessed at) until that's extended.
 
 ## Phase 14 — Wikipedia pageviews — ✅ DONE (built out of order)
 

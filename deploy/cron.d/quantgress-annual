@@ -1,0 +1,8 @@
+# Quantgress — annual cron jobs
+# Install: sudo cp quantgress-annual /etc/cron.d/quantgress-annual && sudo chmod 644 /etc/cron.d/quantgress-annual
+# Election-cycle / annual-filing sources. Run early January, after year-end filings settle.
+#
+# minute hour dom month dow  user     command
+     0    9    2    1    *   ubuntu   cd /home/ubuntu/quantgress && venv/bin/python scrape_donors.py >> logs/donors.log 2>&1
+    15    9    2    1    *   ubuntu   cd /home/ubuntu/quantgress && venv/bin/python scrape_execcomp.py >> logs/execcomp.log 2>&1
+    30    9    2    1    *   ubuntu   cd /home/ubuntu/quantgress && venv/bin/python scrape_senate_annual.py >> logs/senate_annual.log 2>&1
