@@ -33,13 +33,16 @@ columns -- filing_year, cycle, fiscal_year, cik).
 """
 
 import duckdb
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
+
+from auth import init_db, require_key
 
 DB_PATH = "congress_trades.duckdb"
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 1000
 
-app = FastAPI(title="Quantgress API")
+init_db()  # idempotent -- creates api_keys table if missing
+app = FastAPI(title="Quantgress API", dependencies=[Depends(require_key)])
 
 # name -> (relation, [(column, mode)], default ORDER BY)
 # mode: "eq" exact, "eq_ci" case-insensitive exact (tickers/symbols/codes
@@ -229,7 +232,11 @@ def selftest():
     fails loudly if a RELATIONS entry names a column/relation that doesn't
     exist, or if the routing/filter/pagination logic breaks."""
     from fastapi.testclient import TestClient
-    c = TestClient(app)
+    from auth import issue_key
+
+    c = TestClient(app, headers={"X-API-Key": issue_key("api-selftest@example.com")})
+
+    assert c.get("/", headers={"X-API-Key": ""}).status_code == 401  # gate is on
 
     r = c.get("/")
     assert r.status_code == 200, r.text
