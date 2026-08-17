@@ -184,9 +184,26 @@ def _read_tsv(zf, name):
 
 
 def read_quarter_zip(content):
+    """Yields exactly one (sub_rows, cover_rows, info_row_iter) triple.
+
+    SUBMISSION.tsv/COVERPAGE.tsv: one row per filing, small, still fully
+    materialized via _read_tsv. INFOTABLE.tsv: one row per holding, millions
+    of rows for a big quarter -- stays a lazy csv.DictReader instead of a
+    list (that list() was OOM-killing this script on the 956Mi-RAM Oracle
+    box, confirmed live 2026-08-17 at anon-rss ~747MB). Caller must drive
+    info_row_iter to exhaustion before the zip closes -- it stays open only
+    while this generator is suspended at yield:
+        for sub, cover, info in read_quarter_zip(content):
+            for row in parse_bulk_quarter(sub, cover, info):
+                ...
+    """
     with zipfile.ZipFile(io.BytesIO(content)) as zf:
-        return (_read_tsv(zf, "SUBMISSION.tsv"), _read_tsv(zf, "COVERPAGE.tsv"),
-                _read_tsv(zf, "INFOTABLE.tsv"))
+        sub = _read_tsv(zf, "SUBMISSION.tsv")
+        cover = _read_tsv(zf, "COVERPAGE.tsv")
+        with zf.open("INFOTABLE.tsv") as f:
+            info = csv.DictReader(
+                io.TextIOWrapper(f, encoding="utf-8", errors="replace"), delimiter="\t")
+            yield sub, cover, info
 
 
 def parse_bulk_quarter(sub_rows, cover_rows, info_rows):
@@ -284,28 +301,39 @@ def main_bulk(quarter=None, limit=None):
 
     print(f"{quarter}: downloading {url}")
     r = _get(s, url)
-    sub, cover, info = read_quarter_zip(r.content)
-    print(f"  {len(sub)} submissions, {len(cover)} cover pages, {len(info)} info table rows")
+    content = r.content
+    del r  # drop the Response (incl. its internal buffers) before the
+           # streaming parse starts -- free insurance, not the actual fix
 
     added = skipped = 0
     insert_sql = f"INSERT INTO {TABLE} ({','.join(COLUMNS)}) VALUES ({','.join('?' * len(COLUMNS))})"
-    for row in parse_bulk_quarter(sub, cover, info):
-        if limit is not None and added >= limit:
-            break
-        key = (row["accession_number"], row["infotable_sk"])
-        if key in done:
-            skipped += 1
-            continue
-        con.execute(insert_sql, [row[c] for c in COLUMNS])
-        done.add(key)
-        added += 1
-        if added % 5000 == 0:
-            print(f"  ...{added} added so far")
+    for sub, cover, info in read_quarter_zip(content):
+        print(f"  {len(sub)} submissions, {len(cover)} cover pages")
+        info_count = 0
+
+        def _tap(it):
+            nonlocal info_count
+            for row in it:
+                info_count += 1
+                yield row
+
+        for row in parse_bulk_quarter(sub, cover, _tap(info)):
+            if limit is not None and added >= limit:
+                break
+            key = (row["accession_number"], row["infotable_sk"])
+            if key in done:
+                skipped += 1
+                continue
+            con.execute(insert_sql, [row[c] for c in COLUMNS])
+            done.add(key)
+            added += 1
+            if added % 5000 == 0:
+                print(f"  ...{added} added so far")
 
     ensure_views(con)
     total = con.execute(f"SELECT count(*) FROM {TABLE}").fetchone()[0]
     print(f"\n{total} 13F holdings rows in {DB_PATH}; this run added {added},"
-          f" skipped {skipped} already-stored")
+          f" skipped {skipped} already-stored, out of {info_count} info-table rows read")
 
 
 SAMPLE_SUB = [
@@ -346,6 +374,31 @@ def selftest():
 
     assert _iso_date("30-JUN-2026") == "2026-06-30"
     assert _iso_date("") is None and _iso_date(None) is None
+
+    # --- read_quarter_zip: round-trip a real zip, and guard against ever
+    # regressing INFOTABLE.tsv back to a fully-materialized list (that list()
+    # was the OOM -- see read_quarter_zip's docstring) ---
+    def _write_tsv(zf, name, rows):
+        buf = io.StringIO()
+        w = csv.DictWriter(buf, fieldnames=rows[0].keys(), delimiter="\t")
+        w.writeheader()
+        w.writerows(rows)
+        zf.writestr(name, buf.getvalue())
+
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w") as zf:
+        _write_tsv(zf, "SUBMISSION.tsv", SAMPLE_SUB)
+        _write_tsv(zf, "COVERPAGE.tsv", SAMPLE_COVER)
+        _write_tsv(zf, "INFOTABLE.tsv", SAMPLE_INFO)
+
+    zrows = []
+    quarters_seen = 0
+    for zsub, zcover, zinfo in read_quarter_zip(zip_buf.getvalue()):
+        quarters_seen += 1
+        assert not isinstance(zinfo, list), "INFOTABLE.tsv must stay a lazy iterator, not a materialized list"
+        zrows = list(parse_bulk_quarter(zsub, zcover, zinfo))  # must consume zinfo before this loop advances
+    assert quarters_seen == 1
+    assert len(zrows) == 1 and zrows[0]["issuer_name"] == "APPLE INC", zrows
 
     # --- list_periods URL discovery, both path-prefix variants ---
     sample_html = (
